@@ -1,13 +1,28 @@
-import streamlit as st
-import sys
+import json
 import os
+import urllib.error
+import urllib.request
 
-# Thêm đường dẫn thư mục gốc vào hệ thống để import được file agent_logic.py
-sys.path.append(os.path.abspath(os.path.dirname(__file__)))
-import importlib
-import src.agents.agent_logic as agent_logic
-importlib.reload(agent_logic)
-from src.agents.agent_logic import generate_advisor_response_stream
+import streamlit as st
+
+BACKEND_URL = os.getenv("BACKEND_URL", "http://127.0.0.1:8000")
+
+
+def request_backend_answer(user_message: str, history: list[dict[str, str]]) -> str:
+    payload = json.dumps({"message": user_message, "history": history}).encode("utf-8")
+    request = urllib.request.Request(
+        f"{BACKEND_URL}/chat",
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+
+    try:
+        with urllib.request.urlopen(request, timeout=120) as response:
+            body = json.loads(response.read().decode("utf-8"))
+            return body.get("answer", "")
+    except urllib.error.URLError:
+        return "Không thể kết nối backend. Vui lòng chạy API server trước khi chat."
 
 # 1. Cấu hình tiêu đề trang web
 st.set_page_config(page_title="Trợ lý AI Điện Máy Xanh", page_icon="⚡", layout="centered")
@@ -35,9 +50,10 @@ if user_input := st.chat_input("Nhập nhu cầu của anh/chị tại đây..."
         st.markdown(user_input)
     st.session_state.messages.append({"role": "user", "content": user_input})
     
-    # Kích hoạt bộ não AI chạy local xử lý câu trả lời
+    # Gọi backend API để xử lý câu trả lời
     with st.chat_message("assistant"):
-        ai_response = st.write_stream(generate_advisor_response_stream(user_input, history=st.session_state.messages))
-            
+        ai_response = request_backend_answer(user_input, st.session_state.messages)
+        st.markdown(ai_response)
+
     # Lưu câu trả lời của AI vào lịch sử chat
     st.session_state.messages.append({"role": "assistant", "content": ai_response})

@@ -5,12 +5,19 @@
 pip install -r requirements.txt
 ```
 
-## 2) Khởi chạy ứng dụng Streamlit
+## 2) Khởi chạy back end (FastAPI)
+```bash
+uvicorn src.api.main:app --reload --host 0.0.0.0 --port 8000
+```
+
+## 3) Khởi chạy front end (Streamlit)
 ```bash
 streamlit run app.py
 ```
 
-## 3) Workflow backend mới
+> Front end gọi API qua biến môi trường `BACKEND_URL` (mặc định `http://127.0.0.1:8000`).
+
+## 4) Workflow backend mới
 Luồng xử lý đã tách theo kiến trúc:
 - `src/schemas`: contract dữ liệu pipeline (`NeedExtraction`, `SearchFilters`, `RankingInput`, `TradeoffOutput`, `ResponsePayload`)
 - `src/repositories`: chỉ truy cập PostgreSQL (`ProductRepository`)
@@ -26,7 +33,7 @@ Pipeline:
 5. Deterministic trade-off
 6. LLM response generation từ payload backend
 
-## 4) Chạy unit tests
+## 5) Chạy unit tests
 ```bash
 python -m unittest discover -s tests -p 'test_*.py' -v
 ```
