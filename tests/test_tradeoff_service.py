@@ -14,7 +14,9 @@ class TradeoffServiceTests(unittest.TestCase):
                     name="Prod A",
                     sale_price=10000000,
                     rating=4.8,
+                    quantity_sold=30,
                     stock=30,
+                    promotion="Giảm 500k",
                     specifications={"ram": 16},
                 ),
                 score=0.9,
@@ -25,6 +27,7 @@ class TradeoffServiceTests(unittest.TestCase):
                     name="Prod B",
                     sale_price=14000000,
                     rating=4.2,
+                    quantity_sold=10,
                     stock=10,
                     specifications={"ram": 8},
                 ),
@@ -36,6 +39,7 @@ class TradeoffServiceTests(unittest.TestCase):
 
         self.assertEqual(len(output.items), 2)
         self.assertTrue(output.items[0].pros)
+        self.assertTrue(output.comparison)
         self.assertTrue(output.items[1].cons)
 
 

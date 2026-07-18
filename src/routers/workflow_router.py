@@ -16,5 +16,9 @@ class WorkflowRequest(BaseModel):
 
 @router.post("/query")
 def query_workflow(payload: WorkflowRequest):
+    """
+    Full shopping workflow:
+    Need Extraction → Clarification → PostgreSQL Search → Rank → Trade-off
+    """
     result = service.run(user_message=payload.message, history=payload.history)
     return result.model_dump()

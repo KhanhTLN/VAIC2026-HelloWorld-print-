@@ -7,7 +7,7 @@ from collections.abc import Generator
 import requests
 
 OLLAMA_URL = "http://localhost:11434/api/chat"
-MODEL_NAME = "qwen2.5:3b"
+MODEL_NAME = "qwen2.5:7b"
 
 
 def _build_messages(system_prompt: str, messages: list[dict[str, str]] | None) -> list[dict[str, str]]:
