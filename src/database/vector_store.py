@@ -2,6 +2,10 @@ import chromadb
 from chromadb.utils import embedding_functions
 import json
 import sys
+import os
+
+# Thêm thư mục gốc dự án vào sys.path để tránh lỗi import "No module named 'src'"
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
 # Cấu hình stdout hiển thị tốt Tiếng Việt trên terminal Windows
 if sys.platform.startswith('win'):
@@ -125,7 +129,7 @@ col = client.get_or_create_collection("test")
 col.add(ids=["1"], documents=["test"])
 """
     try:
-        res = subprocess.run([sys.executable, "-c", test_code], capture_output=True, timeout=3)
+        res = subprocess.run([sys.executable, "-c", test_code], capture_output=True, timeout=30)
         if res.returncode != 0:
             _use_mock = True
     except Exception:
@@ -264,7 +268,14 @@ def init_vector_db():
                 "url": p['url']
             } for p in products]
             
-            catalog_collection.add(ids=ids, documents=documents, metadatas=metadatas)
+            # Chia nhỏ dữ liệu thành các batch (ví dụ: mỗi batch tối đa 2000 sản phẩm) để tránh giới hạn của ChromaDB
+            batch_size = 2000
+            for i in range(0, len(products), batch_size):
+                batch_ids = ids[i:i + batch_size]
+                batch_docs = documents[i:i + batch_size]
+                batch_metas = metadatas[i:i + batch_size]
+                catalog_collection.add(ids=batch_ids, documents=batch_docs, metadatas=batch_metas)
+                
             print("Đã nạp dữ liệu Catalog vào Vector DB thành công!")
         else:
             print("Không tìm thấy sản phẩm nào trong DB để nạp.")
@@ -281,7 +292,13 @@ def init_vector_db():
         chunks = text_splitter.split_text(policy_text)
         
         policy_ids = [f"policy_{i}" for i in range(len(chunks))]
-        policy_collection.add(ids=policy_ids, documents=chunks)
+        # Chia nhỏ dữ liệu chính sách thành các batch
+        batch_size = 2000
+        for i in range(0, len(chunks), batch_size):
+            batch_ids = policy_ids[i:i + batch_size]
+            batch_docs = chunks[i:i + batch_size]
+            policy_collection.add(ids=batch_ids, documents=batch_docs)
+            
         print(f"Đã nạp {len(chunks)} đoạn chính sách vào Vector DB!")
     except FileNotFoundError:
         print("Chưa có file policy.txt, bỏ qua nạp chính sách (hãy bổ sung sau).")
@@ -331,16 +348,22 @@ def query_products(query_text, category=None, brand=None, budget=None, n_results
         is_upsell = False
         results = collection.query(query_texts=[search_query], n_results=n_results, where=where)
         
-        # TIER 2 Fallback: Nếu lọc theo ngân sách mà trống -> Truy vấn cận biên (Upsell) bằng cách bỏ lọc giá
+        # Fallback TIER 1.5: Nếu lọc thương hiệu mà trống -> Thử truy vấn bỏ lọc thương hiệu để tránh lệch ký tự hoa thường
+        if brand and (not results or not results.get("metadatas") or len(results["metadatas"][0]) == 0):
+            where_clauses_no_brand = [c for c in where_clauses if "brand" not in c]
+            where_no_brand = None
+            if len(where_clauses_no_brand) == 1:
+                where_no_brand = where_clauses_no_brand[0]
+            elif len(where_clauses_no_brand) > 1:
+                where_no_brand = {"$and": where_clauses_no_brand}
+            results = collection.query(query_texts=[search_query], n_results=n_results, where=where_no_brand)
+            
+        # Fallback TIER 2: Nếu lọc theo ngân sách mà trống -> Truy vấn cận biên (Upsell) bằng cách bỏ lọc giá
         if budget and (not results or not results.get("metadatas") or len(results["metadatas"][0]) == 0):
             is_upsell = True
-            where_clauses_no_budget = [c for c in where_clauses if "price" not in c]
-            where_no_budget = None
-            if len(where_clauses_no_budget) == 1:
-                where_no_budget = where_clauses_no_budget[0]
-            elif len(where_clauses_no_budget) > 1:
-                where_no_budget = {"$and": where_clauses_no_budget}
-            results = collection.query(query_texts=[search_query], n_results=2, where=where_no_budget)
+            # Giữ lại bộ lọc category để không bị nhảy sang ngành hàng khác
+            where_fallback = {"category": category} if category else None
+            results = collection.query(query_texts=[search_query], n_results=2, where=where_fallback)
             
         products = []
         if results and results.get("metadatas") and len(results["metadatas"]) > 0:

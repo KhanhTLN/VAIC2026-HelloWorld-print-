@@ -1,4 +1,6 @@
 - python src/database/sync_supabase.py: chính thức từ db
 - python src/database/data_processing.py: dự phòng khi bị lỗi
 - ollama run qwen2.5:3b: khởi chạy AI local
-- streamlit run src/ui/app.py: khởi chạy app
+- streamlit app.py: khởi chạy app
+- python src/database/vector_store.py
+- python server.py

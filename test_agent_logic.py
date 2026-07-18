@@ -39,3 +39,6 @@ if __name__ == "__main__":
     
     # Test 5: Hỏi model cụ thể (Tư vấn trực tiếp)
     test_query("tư vấn iPhone 16 Pro Max")
+    
+    # Test 6: Hỏi model cụ thể bị hết hàng hoàn toàn (Phải xin lỗi và gợi ý sản phẩm thay thế cùng hãng có giá gần nhất)
+    test_query("tư vấn giúp tôi iphone 15 pro max")
