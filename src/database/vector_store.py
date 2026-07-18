@@ -1,103 +1,21 @@
 import chromadb
 from chromadb.utils import embedding_functions
-import json
 import sys
 
 # Cấu hình stdout hiển thị tốt Tiếng Việt trên terminal Windows
 if sys.platform.startswith('win'):
     sys.stdout.reconfigure(encoding='utf-8')
 
-class MockCollection:
-    def __init__(self, name):
-        self.name = name
-    def add(self, ids, documents, metadatas=None):
-        import os
-        os.makedirs("chroma_db_mock", exist_ok=True)
-        path = f"chroma_db_mock/{self.name}.json"
-        data = []
-        for i in range(len(ids)):
-            data.append({
-                "id": ids[i],
-                "document": documents[i],
-                "metadata": metadatas[i] if metadatas else {}
-            })
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=4)
-
-    def query(self, query_texts, n_results=1):
-        path = f"chroma_db_mock/{self.name}.json"
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-        except Exception:
-            data = []
-            
-        results = {
-            "ids": [],
-            "documents": [],
-            "metadatas": [],
-            "distances": []
-        }
-        
-        for q in query_texts:
-            q_words = set(q.lower().split())
-            scored_docs = []
-            for item in data:
-                doc = item["document"]
-                doc_words = set(doc.lower().split())
-                intersection = q_words.intersection(doc_words)
-                union = q_words.union(doc_words)
-                score = len(intersection) / len(union) if union else 0.0
-                scored_docs.append((score, item))
-                
-            scored_docs.sort(key=lambda x: x[0], reverse=True)
-            top_docs = scored_docs[:n_results]
-            
-            results["ids"].append([x[1]["id"] for x in top_docs])
-            results["documents"].append([x[1]["document"] for x in top_docs])
-            results["metadatas"].append([x[1]["metadata"] for x in top_docs])
-            results["distances"].append([1.0 - x[0] for x in top_docs])
-            
-        return results
-
-class MockClient:
-    def get_or_create_collection(self, name, embedding_function=None):
-        return MockCollection(name)
-    def get_collection(self, name, embedding_function=None):
-        return MockCollection(name)
-
 _client = None
 _default_ef = None
-_use_mock = None
 
 def get_vector_client():
-    global _client, _default_ef, _use_mock
+    global _client, _default_ef
     if _client is not None:
         return _client, _default_ef
-    
-    import subprocess
-    _use_mock = False
-    test_code = """
-import chromadb
-client = chromadb.EphemeralClient()
-col = client.get_or_create_collection("test")
-col.add(ids=["1"], documents=["test"])
-"""
-    try:
-        res = subprocess.run([sys.executable, "-c", test_code], capture_output=True, timeout=3)
-        if res.returncode != 0:
-            _use_mock = True
-    except Exception:
-        _use_mock = True
 
-    if _use_mock:
-        print("Cảnh báo: Phát hiện lỗi tương thích hệ thống với ChromaDB (lỗi onnxruntime hoặc CPU không hỗ trợ AVX2).")
-        print("-> Hệ thống sẽ tự động sử dụng Mock Vector DB để tránh crash.")
-        _client = MockClient()
-        _default_ef = None
-    else:
-        _client = chromadb.PersistentClient(path="./chroma_db")
-        _default_ef = embedding_functions.DefaultEmbeddingFunction()
+    _client = chromadb.PersistentClient(path="./chroma_db")
+    _default_ef = embedding_functions.DefaultEmbeddingFunction()
         
     return _client, _default_ef
 

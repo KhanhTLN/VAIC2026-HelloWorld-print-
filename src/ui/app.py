@@ -4,9 +4,6 @@ import os
 
 # Thêm đường dẫn thư mục gốc vào hệ thống để import được file agent_logic.py
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../../')))
-import importlib
-import src.agents.agent_logic as agent_logic
-importlib.reload(agent_logic)
 from src.agents.agent_logic import generate_advisor_response_stream
 
 # 1. Cấu hình tiêu đề trang web
