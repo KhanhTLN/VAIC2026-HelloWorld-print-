@@ -2,13 +2,13 @@ import requests
 import json
 import os
 import re
-from src.database.vector_store import query_policy
+from src.database.vector_store import query_policy, query_products
 from src.database.sync_supabase import get_db_connection, safe_int, format_price
 
 OLLAMA_URL = "http://localhost:11434/api/chat"
 MODEL_NAME = "qwen2.5:3b" # Thay bằng qwen2.5:1.5b hoặc bản bạn đã tải thành công
 
-def call_local_llm_stream(system_prompt, messages):
+def call_local_llm_stream(system_prompt, messages, is_recommendation=False):
     """Gửi yêu cầu qua API Chat của Ollama để tận dụng template hội thoại chuẩn của mô hình"""
     payload_messages = [{"role": "system", "content": system_prompt}]
     
@@ -19,10 +19,33 @@ def call_local_llm_stream(system_prompt, messages):
             "content": msg["content"]
         })
         
-    # Thêm chỉ dẫn khẩn cấp cuối danh sách tin nhắn để ghi đè xu hướng tiếng Trung của Qwen
+    # Thêm chỉ dẫn khẩn cấp cuối danh sách tin nhắn để ghi đè xu hướng tiếng Trung và cưỡng chế định dạng
+    if is_recommendation:
+        rejection_prompt = (
+            "BẮT BUỘC: Bạn là tư vấn viên Việt Nam, chỉ viết bằng tiếng Việt. KHÔNG ĐƯỢC phép sử dụng bất kỳ chữ Hán/chữ Trung Quốc nào.\n"
+            "QUY TẮC PHÁT NGÔN SỐNG CÒN:\n"
+            "1. KHÔNG ĐƯỢC TỰ BỊA giá bán, cấu hình, link ảnh hay link sản phẩm. Chỉ dùng thông tin trong context được cung cấp.\n"
+            "2. LUÔN LUÔN làm nổi bật giá tiền bằng cách tăng 1 size chữ và in đậm: `<span style=\"font-size: 1.15em;\">**[Giá tiền]đ**</span>`. Ví dụ: `<span style=\"font-size: 1.15em;\">**3.850.000đ**</span>`.\n"
+            "3. TRÌNH BÀY BẮT BUỘC (Theo mẫu):\n"
+            "Anh chị tham khảo sản phẩm [Tên sản phẩm] giá [Giá tiền đã bọc thẻ span] ạ.\n"
+            "- [Thông số chính (như Dung tích, Diện tích phòng, Nhu cầu, v.v.)]: [Giá trị]\n"
+            "- Tiện ích: [Tiện ích]\n"
+            "[Thông tin tồn kho và khuyến mãi nếu có]\n"
+            "[Xem chi tiết sản phẩm tại Điện Máy Xanh](url)\n"
+            "![ảnh sản phẩm](url_image)\n"
+            "Anh/chị có quan tâm không ạ?"
+        )
+    else:
+        rejection_prompt = (
+            "BẮT BUỘC: Bạn là tư vấn viên Việt Nam, chỉ viết bằng tiếng Việt. KHÔNG ĐƯỢC phép sử dụng bất kỳ chữ Hán/chữ Trung Quốc nào.\n"
+            "QUY TẮC PHÁT NGÔN SỐNG CÒN:\n"
+            "1. Chỉ tập trung thực hiện nhiệm vụ được giao trong system prompt.\n"
+            "2. Không tự bịa thông tin sản phẩm khi chưa có context sản phẩm."
+        )
+        
     payload_messages.append({
         "role": "system",
-        "content": "BẮT BUỘC: Bạn là tư vấn viên Việt Nam, chỉ viết bằng tiếng Việt. KHÔNG ĐƯỢC phép sử dụng bất kỳ chữ Hán/chữ Trung Quốc nào (ví dụ: 比如, 办公, 学习, 建议, etc.) trong câu trả lời."
+        "content": rejection_prompt
     })
         
     payload = {
@@ -56,7 +79,8 @@ def analyze_intent_fast(user_message):
         "room_size": None, 
         "family_members": None,
         "laptop_needs": None,
-        "headphone_needs": None
+        "headphone_needs": None,
+        "phone_needs": None
     }
     
     # 1. Nhận dạng ngành hàng (category) với danh sách từ khóa mở rộng rộng rãi
@@ -98,6 +122,14 @@ def analyze_intent_fast(user_message):
         intent["headphone_needs"] = "chup-tai"
     elif any(kw in cleaned for kw in ["nhét tai", "nhet tai", "true wireless", "earbuds", "in-ear", "in ear"]):
         intent["headphone_needs"] = "nhet-tai"
+
+    # 4.6. Nhận dạng nhu cầu điện thoại (phone_needs)
+    if any(kw in cleaned for kw in ["chụp ảnh", "chup anh", "selfie", "chụp hình", "chup hinh", "camera", "quay phim", "quay video"]):
+        intent["phone_needs"] = "chup-anh"
+    elif any(kw in cleaned for kw in ["pin trâu", "pin trau", "pin khỏe", "pin khoe", "dung lượng pin", "pin dung luong cao"]):
+        intent["phone_needs"] = "pin-trau"
+    elif any(kw in cleaned for kw in ["chơi game", "choi game", "gaming", "hiệu năng", "hieu nang", "cấu hình mạnh", "cau hinh manh", "mượt", "muot"]):
+        intent["phone_needs"] = "choi-game"
 
     # 5. Nhận dạng ngân sách (budget)
     budget_match = re.search(r'(\d+(?:[\.,]\d+)?)\s*(?:tr|triệu|triêu|t)\b', cleaned)
@@ -485,6 +517,7 @@ def generate_advisor_response_stream(user_message, history=None):
         "family_members": None,
         "laptop_needs": None,
         "headphone_needs": None,
+        "phone_needs": None,
         "product_query": None
     }
     
@@ -506,6 +539,7 @@ def generate_advisor_response_stream(user_message, history=None):
                         "family_members": None,
                         "laptop_needs": None,
                         "headphone_needs": None,
+                        "phone_needs": None,
                         "product_query": content if prev_keywords else None
                     }
                 else:
@@ -523,6 +557,8 @@ def generate_advisor_response_stream(user_message, history=None):
                         accumulated_intent["laptop_needs"] = prev_intent["laptop_needs"]
                     if prev_intent.get("headphone_needs"):
                         accumulated_intent["headphone_needs"] = prev_intent["headphone_needs"]
+                    if prev_intent.get("phone_needs"):
+                        accumulated_intent["phone_needs"] = prev_intent["phone_needs"]
                     if prev_keywords:
                         accumulated_intent["product_query"] = content
             elif role == "assistant":
@@ -547,6 +583,7 @@ def generate_advisor_response_stream(user_message, history=None):
             "family_members": current_intent.get("family_members"),
             "laptop_needs": current_intent.get("laptop_needs"),
             "headphone_needs": current_intent.get("headphone_needs"),
+            "phone_needs": current_intent.get("phone_needs"),
             "product_query": user_message if current_keywords else None
         }
     else:
@@ -564,12 +601,19 @@ def generate_advisor_response_stream(user_message, history=None):
             accumulated_intent["laptop_needs"] = current_intent["laptop_needs"]
         if current_intent.get("headphone_needs"):
             accumulated_intent["headphone_needs"] = current_intent["headphone_needs"]
+        if current_intent.get("phone_needs"):
+            accumulated_intent["phone_needs"] = current_intent["phone_needs"]
         if current_keywords:
             accumulated_intent["product_query"] = user_message
         
     category = accumulated_intent.get('category')
     brand = accumulated_intent.get('brand')
     budget = accumulated_intent.get('budget')
+    room_size = accumulated_intent.get('room_size')
+    family_members = accumulated_intent.get('family_members')
+    laptop_needs = accumulated_intent.get('laptop_needs')
+    headphone_needs = accumulated_intent.get('headphone_needs')
+    phone_needs = accumulated_intent.get('phone_needs')
     room_size = accumulated_intent.get('room_size')
     family_members = accumulated_intent.get('family_members')
     laptop_needs = accumulated_intent.get('laptop_needs')
@@ -594,12 +638,179 @@ def generate_advisor_response_stream(user_message, history=None):
         policy_chunks = query_policy(user_message, n_results=3)
         if policy_chunks:
             policy_context = "\n".join([f"- {chunk}" for chunk in policy_chunks])
+
+    # 2. XÁC ĐỊNH LOGIC HỎI LÀM RÕ TIÊU CHÍ (SPEC CLARIFICATION)
+    need_clarify = False
+    clarify_instruction = ""
     
-    # Thực hiện truy vấn sản phẩm từ Database bằng chuỗi truy vấn thực tế
-    context, is_upsell, top_relevance = db_search_products(category, brand, budget, query_to_search)
+    if category and not is_policy_query:
+        # Kiểm tra từ chối hoặc số lần đã hỏi làm rõ
+        refused_clarify = False
+        all_user_messages = [msg for msg in history if msg.get("role") == "user"] if history else []
+        all_user_messages.append({"role": "user", "content": user_message})
+        
+        refusal_keywords = ["bỏ qua", "skip", "không cần", "khong can", "không muốn", "khong muon", 
+                            "tùy", "tuy", "đại đi", "dai di", "nào cũng được", "nao cung duoc", "bất kỳ", "bat ky"]
+        for msg in all_user_messages:
+            content_lower = msg.get("content", "").lower()
+            if any(kw in content_lower for kw in refusal_keywords):
+                refused_clarify = True
+                break
+                
+        # Kiểm tra xem trợ lý đã từng hỏi làm rõ câu nào chưa
+        clarify_count = 0
+        if history:
+            for msg in history:
+                if msg.get("role") == "assistant":
+                    content = msg.get("content", "")
+                    if any(phrase in content for phrase in [
+                        "bao nhiêu m²", "bao nhiêu m2", "bao nhiêu người", 
+                        "công việc gì là chủ yếu", "ngân sách dự kiến", 
+                        "nhét tai True Wireless", "kiểu dáng", "thương hiệu", "nhu cầu"
+                    ]):
+                        clarify_count += 1
+
+        # Kiểm tra sự hiện diện của các tiêu chí
+        has_brand = brand is not None
+        has_budget = budget is not None
+        
+        category_need = None
+        if category == 'may-lanh':
+            category_need = room_size
+        elif category == 'tu-lanh':
+            category_need = family_members
+        elif category == 'laptop':
+            category_need = laptop_needs
+        elif category == 'tai-nghe':
+            category_need = headphone_needs
+        elif category == 'dien-thoai':
+            category_need = phone_needs
+            
+        has_need = category_need is not None
+
+        # Kiểm tra xem người dùng có hỏi mẫu sản phẩm cụ thể hay không (ví dụ: iPhone 16, S24...)
+        is_specific_model = False
+        model_keywords = ["pro", "max", "plus", "ultra", "mini", "fold", "flip", "series", "s23", "s24", "iphone 11", "iphone 12", "iphone 13", "iphone 14", "iphone 15", "iphone 16"]
+        has_number = any(char.isdigit() for char in cleaned_msg)
+        if has_number or any(kw in cleaned_msg for kw in model_keywords):
+            is_specific_model = True
+
+        enough_specs = False
+        if is_specific_model:
+            # Nếu khách tìm mã/mẫu máy cụ thể (ví dụ: iPhone 16, S24...), bỏ qua làm rõ tiêu chí
+            enough_specs = True
+        elif has_brand:
+            # Biết thương hiệu rồi: chỉ cần thêm ít nhất 1 spec nữa (ngân sách hoặc nhu cầu)
+            if has_budget or has_need:
+                enough_specs = True
+        else:
+            # Chưa biết thương hiệu: cần có cả ngân sách và nhu cầu (tổng cộng 2 tiêu chí)
+            if has_budget and has_need:
+                enough_specs = True
+                
+        # Quy tắc: Cần làm rõ nếu chưa đủ specs, khách chưa từ chối, và số lần hỏi < 2
+        need_clarify = not enough_specs and not refused_clarify and clarify_count < 2
+        
+        if need_clarify:
+            # Xác định các tiêu chí còn thiếu để thông báo cho LLM hỏi khách
+            missing_parts = []
+            if not has_brand:
+                missing_parts.append("Thương hiệu sản phẩm (ví dụ: iPhone/Samsung cho điện thoại, Daikin/Panasonic cho máy lạnh, v.v.)")
+            if not has_budget:
+                missing_parts.append("Mức ngân sách dự kiến (ví dụ: dưới 10 triệu, khoảng 15 triệu, v.v.)")
+            if not has_need:
+                if category == 'may-lanh':
+                    missing_parts.append("Diện tích phòng (m2) (ví dụ: dưới 15m2, 15-20m2, v.v.)")
+                elif category == 'tu-lanh':
+                    missing_parts.append("Số thành viên sử dụng (ví dụ: 2-3 người, trên 5 người, v.v.)")
+                elif category == 'laptop':
+                    missing_parts.append("Nhu cầu sử dụng chính (ví dụ: học tập/văn phòng, chơi game, thiết kế đồ họa, lập trình, v.v.)")
+                elif category == 'tai-nghe':
+                    missing_parts.append("Kiểu dáng hoặc tính năng (ví dụ: tai nghe chụp tai over-ear, nhét tai True Wireless, có chống ồn ANC, v.v.)")
+                elif category == 'dien-thoai':
+                    missing_parts.append("Nhu cầu tính năng nổi bật (ví dụ: chụp hình đẹp, pin trâu, chơi game mượt, v.v.)")
+                    
+            if has_brand:
+                clarify_instruction = (
+                    f"Khách hàng muốn mua {category} hãng {brand.upper()} nhưng chưa cung cấp Ngân sách hay Nhu cầu cụ thể. "
+                    f"Bạn BẮT BUỘC phải đặt câu hỏi khéo léo để khách hàng lựa chọn/cung cấp ít nhất 1 trong các thông tin sau: {', '.join(missing_parts)}."
+                )
+            else:
+                if not has_budget and not has_need:
+                    clarify_instruction = (
+                        f"Khách hàng muốn tư vấn về {category} nhưng chưa cung cấp thêm thông tin nào. "
+                        f"Bạn BẮT BUỘC phải đặt câu hỏi khéo léo để khách hàng lựa chọn/cung cấp ít nhất 2 tiêu chí trong số các thông tin sau: {', '.join(missing_parts)}."
+                    )
+                else:
+                    clarify_instruction = (
+                        f"Khách hàng muốn tư vấn về {category} (đã biết một số thông tin), nhưng chưa xác định Thương hiệu hay các tiêu chí còn lại. "
+                        f"Bạn BẮT BUỘC phải đặt câu hỏi khéo léo để khách hàng lựa chọn/cung cấp thêm ít nhất 1 thông tin nữa trong số các thông tin sau: {', '.join(missing_parts)}."
+                    )
+
+    # 3. THỰC HIỆN TRUY VẤN RAG NẾU ĐÃ ĐỦ TIÊU CHÍ (HOẶC BỊ BYPASS LÀM RÕ)
+    products = []
+    is_upsell = False
+    context = ""
+    top_relevance = 0
+    
+    if not need_clarify:
+        # Thực hiện truy vấn sản phẩm từ Vector Database bằng chuỗi truy vấn thực tế kết hợp lọc metadata (Hybrid RAG)
+        products, is_upsell = query_products(
+            query_text=query_to_search,
+            category=category,
+            brand=brand,
+            budget=budget,
+            n_results=3
+        )
+        
+        if products:
+            context_list = []
+            for p in products:
+                price = p["sale_price"]
+                name = p["name"]
+                brand_name = p["brand"]
+                cat_name = p["category_name"]
+                promotion = p["promotion"]
+                outstanding = p["outstanding"]
+                spec_product = p["spec_product"]
+                
+                specs_str = ""
+                if spec_product:
+                    if isinstance(spec_product, dict):
+                        specs_str = " - ".join([f"{k}: {v}" for k, v in spec_product.items()])
+                    elif isinstance(spec_product, list):
+                        specs_str = " - ".join([str(item) for item in spec_product])
+                    else:
+                        specs_str = str(spec_product)
+                        
+                formatted_price_str = format_price(price)
+                
+                full_text = (
+                    f"Sản phẩm: {name}. "
+                    f"Thương hiệu: {brand_name or 'Khác'}. "
+                    f"Ngành hàng: {cat_name}. "
+                    f"Giá: {formatted_price_str}. "
+                    f"Thông số: {specs_str}. "
+                    f"Mô tả: {outstanding}. "
+                    f"Link ảnh sản phẩm (url_image): {p.get('url_image', '')}. "
+                    f"Link xem chi tiết (url): {p.get('url', '')}"
+                )
+                
+                stock_info = "Tình trạng tồn kho: Còn hàng (Số lượng: 10 sản phẩm)"
+                if promotion and promotion.strip():
+                    promo_info = f"Khuyến mãi áp dụng: {promotion}"
+                else:
+                    promo_info = "Khuyến mãi áp dụng: Không có chương trình khuyến mãi nào"
+                    
+                enriched_text = f"{full_text}. {stock_info}. {promo_info}."
+                context_list.append(enriched_text)
+                
+            context = "\n".join(context_list)
+            # Giả định top_relevance = 5 để LLM tư vấn trực tiếp sản phẩm tìm được
+            top_relevance = 5
 
     # Phương án 1: Bypass LLM khi DB trống (Tránh LLM tự bịa sản phẩm khi không tìm thấy kết quả RAG)
-    if category and not context and not is_policy_query:
+    if category and not context and not is_policy_query and not need_clarify:
         yield "Dạ, hiện tại hệ thống siêu thị Điện Máy Xanh đang tạm hết dòng sản phẩm phù hợp với yêu cầu này của anh/chị. Anh/chị có thể thử thay đổi tầm giá, điều chỉnh nhu cầu hoặc tham khảo các nhóm sản phẩm khác đang sẵn hàng và có nhiều khuyến mãi lớn nhé ạ!"
         return
 
@@ -615,7 +826,7 @@ def generate_advisor_response_stream(user_message, history=None):
 
     # Đọc nhanh catalog từ Database để kiểm tra thực tế trong kho có sản phẩm thuộc ngành hàng này hay không
     has_category_products = False
-    if category:
+    if category and not need_clarify:
         try:
             conn = get_db_connection()
             cur = conn.cursor()
@@ -650,7 +861,7 @@ def generate_advisor_response_stream(user_message, history=None):
             print(f"Lỗi kiểm tra danh mục từ DB: {e}")
 
     # Nếu phát hiện ngành hàng đó trống trơn trong DB -> Báo hết hàng trực tiếp tại Python (Bypass LLM)
-    if category and not has_category_products:
+    if category and not has_category_products and not need_clarify:
         yield "Dạ, hiện tại ngành hàng này đang tạm hết hàng trên toàn hệ thống siêu thị Điện Máy Xanh. Anh/chị có thể tham khảo các dòng sản phẩm khác như Tủ lạnh, Laptop, Máy rửa chén đang có sẵn rất nhiều sản phẩm và khuyến mãi lớn ạ!"
         return
 
@@ -669,44 +880,6 @@ def generate_advisor_response_stream(user_message, history=None):
         for chunk in call_local_llm_stream(system_greeting, messages=conversation_messages):
             yield chunk
         return
-    
-    # 2. KIỂM TRA TỪ CHỐI & GIỚI HẠN SỐ LẦN HỎI LÀM RÕ (TRÁNH TRA KHẢO KHÁCH HÀNG)
-    refused_clarify = False
-    all_user_messages = [msg for msg in history if msg.get("role") == "user"] if history else []
-    all_user_messages.append({"role": "user", "content": user_message})
-    
-    refusal_keywords = ["bỏ qua", "skip", "không cần", "khong can", "không muốn", "khong muon", 
-                        "tùy", "tuy", "đại đi", "dai di", "nào cũng được", "nao cung duoc", "bất kỳ", "bat ky"]
-    for msg in all_user_messages:
-        content_lower = msg.get("content", "").lower()
-        if any(kw in content_lower for kw in refusal_keywords):
-            refused_clarify = True
-            break
-            
-    # Kiểm tra xem trợ lý đã từng hỏi làm rõ câu nào chưa
-    clarify_count = 0
-    if history:
-        for msg in history:
-            if msg.get("role") == "assistant":
-                content = msg.get("content", "")
-                if any(phrase in content for phrase in ["bao nhiêu m²", "bao nhiêu m2", "bao nhiêu người", "công việc gì là chủ yếu", "ngân sách dự kiến", "nhét tai True Wireless"]):
-                    clarify_count += 1
-
-    # XÁC ĐỊNH CHỈ THỊ HỎI LÀM RÕ (Bypass nếu khách từ chối, đã hỏi rồi, đang hỏi về chính sách, hoặc đã xác định được sản phẩm cụ thể với top_relevance >= 4)
-    clarify_instruction = ""
-    bypass_clarify = (top_relevance >= 4)
-    
-    if not bypass_clarify and not refused_clarify and clarify_count < 1 and not is_policy_query:
-        if category == 'may-lanh' and not room_size and not budget:
-            clarify_instruction = "Khách hàng muốn mua máy lạnh nhưng chưa cung cấp diện tích phòng hoặc ngân sách. Bạn BẮT BUỘC phải hỏi khéo léo về diện tích phòng (m2) để tư vấn công suất máy lạnh (1 HP hay 1.5 HP) phù hợp."
-        elif category == 'tu-lanh' and not family_members and not budget:
-            clarify_instruction = "Khách hàng muốn mua tủ lạnh nhưng chưa cung cấp số thành viên sử dụng hoặc ngân sách. Bạn BẮT BUỘC phải hỏi khéo léo về số người sử dụng để tư vấn dung tích phù hợp."
-        elif category == 'laptop' and not laptop_needs and not budget:
-            clarify_instruction = "Khách hàng muốn mua laptop nhưng chưa rõ nhu cầu sử dụng hoặc ngân sách. Bạn BẮT BUỘC phải hỏi khéo léo về nhu cầu chính (văn phòng học tập hay đồ họa game) để tư vấn cấu hình phù hợp."
-        elif category == 'dien-thoai' and not budget:
-            clarify_instruction = "Khách hàng muốn mua điện thoại nhưng chưa cung cấp ngân sách. Bạn BẮT BUỘC phải hỏi khéo léo về mức ngân sách dự kiến của họ để lọc sản phẩm."
-        elif category == 'tai-nghe' and not headphone_needs and not budget:
-            clarify_instruction = "Khách hàng muốn mua tai nghe nhưng chưa cung cấp kiểu dáng hoặc ngân sách. Bạn BẮT BUỘC phải hỏi khéo léo về kiểu dáng (nhét tai True Wireless hay chụp tai Over-ear) và nhu cầu tính năng (chống ồn ANC, gaming)."
 
     if clarify_instruction:
         system_clarify = f"""Bạn là một nhân viên tư vấn người Việt Nam chuyên nghiệp tại siêu thị Điện Máy Xanh.
@@ -794,7 +967,19 @@ def generate_advisor_response_stream(user_message, history=None):
     4. Không dùng từ ngữ kỹ thuật phức tạp (như Inverter, HP, BTU). Hãy dịch sang ngôn ngữ bình dân (Ví dụ: 'Máy chạy siêu êm ban đêm', 'Tiết kiệm tiền điện cuối tháng', 'Làm mát nhanh sâu').
     5. Luôn nêu rõ ưu và nhược điểm (Trade-off) giữa các lựa chọn để khách hàng dễ ra quyết định.
     6. BẮT BUỘC THÔNG BÁO cụ thể cho khách hàng về Tình trạng tồn kho thực tế và các chương trình Khuyến mãi/Quà tặng đi kèm của từng sản phẩm dựa trên thông tin thực tế được cung cấp.
-    7. ĐỘ DÀI VÀ PHONG CÁCH PHẢN HỒI: Hãy phản hồi cực kỳ ngắn gọn, cô đọng, giới hạn câu trả lời dưới 120-150 từ. Trình bày dưới dạng các đầu dòng rõ ràng để giúp phản hồi sinh ra tức thì (vì chạy cục bộ trên CPU).
+    7. ĐỘ DÀI VÀ PHONG CÁCH PHẢN HỒI: Hãy phản hồi cực kỳ ngắn gọn, cô đọng, giới hạn câu trả lời dưới 150-180 từ. Trình bày dưới dạng các đầu dòng rõ ràng để giúp phản hồi sinh ra tức thì (vì chạy cục bộ trên CPU).
+    8. QUY TẮC TRÌNH BÀY VÀ ĐƯỜNG DẪN UX (TỐI ƯU TRẢI NGHIỆM):
+       - GIÁ TIỀN: BẮT BUỘC luôn luôn làm nổi bật giá tiền bằng cách tăng 1 size chữ và in đậm bằng thẻ span: `<span style="font-size: 1.15em;">**[Giá tiền]đ**</span>`. Ví dụ: `<span style="font-size: 1.15em;">**3.850.000đ**</span>`.
+       - ĐỊNH DẠNG TRÌNH BÀY BẮT BUỘC (Theo mẫu trực quan):
+         Anh chị tham khảo sản phẩm [Tên sản phẩm] giá [Giá tiền đã bọc thẻ span] ạ.
+         - Dung tích (hoặc Diện tích phòng, Nhu cầu tùy ngành hàng): [Giá trị phù hợp]
+         - Tiện ích: [Tiện ích chính dịch sang ngôn ngữ bình dân]
+         [Thông tin tồn kho và khuyến mãi nếu có]
+         
+         [Xem chi tiết sản phẩm tại Điện Máy Xanh](url)
+         ![ảnh sản phẩm](url_image)
+         Anh/chị có quan tâm không ạ?
+       - Bạn chỉ được chèn link xem chi tiết và ảnh nếu có trong context (trường 'url' và 'url_image'), tuyệt đối không tự bịa link.
     {other_products_instruction}
     {confirmation_instruction}
     
@@ -802,5 +987,6 @@ def generate_advisor_response_stream(user_message, history=None):
     {extra_clarify}
     Hãy bắt đầu bằng một lời chào lịch sự thân thiện."""
 
-    for chunk in call_local_llm_stream(system_advisor, messages=conversation_messages):
+    for chunk in call_local_llm_stream(system_advisor, messages=conversation_messages, is_recommendation=not is_policy_query):
         yield chunk
+

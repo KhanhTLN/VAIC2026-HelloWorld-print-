@@ -9,7 +9,7 @@ BACKEND_URL = os.getenv("BACKEND_URL", "http://127.0.0.1:8001")
 st.set_page_config(page_title="Trợ lý AI Điện Máy Xanh", page_icon="⚡", layout="centered")
 
 st.title("⚡ Trợ lý AI Tư vấn Điện Máy Xanh")
-st.caption("Giao diện Frontend Trợ lý AI - Thử nghiệm mua sắm thông minh VIC 2026")
+st.caption("Giao diện Frontend Trợ lý AI - Thử nghiệm mua sắm thông minh VAIC 2026")
 st.write("---")
 
 # 2. Khởi tạo lịch sử chat lưu trong bộ nhớ trình duyệt
@@ -58,8 +58,18 @@ if user_input := st.chat_input("Nhập nhu cầu của anh/chị tại đây..."
     st.session_state.messages.append({"role": "user", "content": user_input})
     
     # Gọi API Backend để nhận stream chữ phản hồi
+    # with st.chat_message("assistant"):
+    #     ai_response = st.write_stream(get_backend_stream(user_input, st.session_state.messages))
     with st.chat_message("assistant"):
-        ai_response = st.write_stream(get_backend_stream(user_input, st.session_state.messages))
+        placeholder = st.empty()
+        ai_response = ""
+
+        for chunk in get_backend_stream(user_input, st.session_state.messages):
+            ai_response += chunk
+            placeholder.markdown(
+                ai_response,
+                unsafe_allow_html=True
+            )
             
     # Lưu câu trả lời của AI vào lịch sử chat
     st.session_state.messages.append({"role": "assistant", "content": ai_response})

@@ -10,6 +10,15 @@ if sys.platform.startswith('win'):
 class MockCollection:
     def __init__(self, name):
         self.name = name
+    def count(self):
+        path = f"chroma_db_mock/{self.name}.json"
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return len(data)
+        except Exception:
+            return 0
+            
     def add(self, ids, documents, metadatas=None):
         import os
         os.makedirs("chroma_db_mock", exist_ok=True)
@@ -24,7 +33,7 @@ class MockCollection:
         with open(path, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=4)
 
-    def query(self, query_texts, n_results=1):
+    def query(self, query_texts, n_results=1, where=None):
         path = f"chroma_db_mock/{self.name}.json"
         try:
             with open(path, "r", encoding="utf-8") as f:
@@ -39,10 +48,42 @@ class MockCollection:
             "distances": []
         }
         
+        # Áp dụng bộ lọc where (ChromaDB metadata query syntax)
+        filtered_data = []
+        if where:
+            def eval_filter(meta, expr):
+                for k, v in expr.items():
+                    if k == "$and":
+                        return all(eval_filter(meta, sub) for sub in v)
+                    if k == "$or":
+                        return any(eval_filter(meta, sub) for sub in v)
+                    
+                    if k not in meta:
+                        return False
+                    val = meta[k]
+                    if isinstance(v, dict):
+                        for op, op_val in v.items():
+                            if op == "$lte" and not (val <= op_val): return False
+                            if op == "$lt" and not (val < op_val): return False
+                            if op == "$gte" and not (val >= op_val): return False
+                            if op == "$gt" and not (val > op_val): return False
+                            if op == "$eq" and not (val == op_val): return False
+                            if op == "$ne" and not (val != op_val): return False
+                    else:
+                        if val != v:
+                            return False
+                return True
+                
+            for item in data:
+                if eval_filter(item.get("metadata", {}), where):
+                    filtered_data.append(item)
+        else:
+            filtered_data = data
+            
         for q in query_texts:
             q_words = set(q.lower().split())
             scored_docs = []
-            for item in data:
+            for item in filtered_data:
                 doc = item["document"]
                 doc_words = set(doc.lower().split())
                 intersection = q_words.intersection(doc_words)
@@ -135,7 +176,9 @@ def init_vector_db():
                 p.original_price,
                 p.promotion, 
                 p.outstanding,
-                p.spec_product
+                p.spec_product,
+                p.url_image,
+                p.url
             FROM products p
             LEFT JOIN categories c ON p.category_id = c.category_id
         """
@@ -168,11 +211,35 @@ def init_vector_db():
                 f"Mô tả: {description}"
             )
             
+            # Chuẩn hóa thương hiệu sang dạng chuẩn hoa để khớp bộ lọc
+            raw_brand = (row[2] or '').strip().lower()
+            norm_brand = "KHÁC"
+            brand_map = {
+                "iphone": "APPLE", "apple": "APPLE", "samsung": "SAMSUNG", "oppo": "OPPO", 
+                "xiaomi": "XIAOMI", "redmi": "XIAOMI", "realme": "REALME", "vivo": "VIVO", 
+                "lg": "LG", "sharp": "SHARP", "hitachi": "HITACHI", "panasonic": "PANASONIC", 
+                "toshiba": "TOSHIBA", "daikin": "DAIKIN", "casper": "CASPER", "asus": "ASUS", 
+                "hp": "HP", "acer": "ACER", "lenovo": "LENOVO", "dell": "DELL", "msi": "MSI", 
+                "sony": "SONY", "jbl": "JBL", "marshall": "MARSHALL"
+            }
+            for kw, b in brand_map.items():
+                if kw in raw_brand:
+                    norm_brand = b
+                    break
+
             products.append({
                 "id": str(row[0]),
-                "brand": (row[2] or '').strip().upper(),
+                "name": str(row[1]),
+                "brand": norm_brand,
+                "category_name": str(row[3]) if row[3] else "Khác",
                 "category": normalized_cat,
                 "price": price,
+                "original_price": float(row[5]) if row[5] is not None else 0.0,
+                "promotion": str(row[6]) if row[6] is not None else "",
+                "outstanding": str(row[7]) if row[7] is not None else "",
+                "spec_product": json.dumps(row[8], ensure_ascii=False) if row[8] is not None else "",
+                "url_image": str(row[9]) if row[9] is not None else "",
+                "url": str(row[10]) if row[10] is not None else "",
                 "full_text": full_text
             })
             
@@ -182,7 +249,20 @@ def init_vector_db():
         if products:
             ids = [p['id'] for p in products]
             documents = [p['full_text'] for p in products]
-            metadatas = [{"brand": p['brand'], "category": p['category'], "price": p['price']} for p in products]
+            metadatas = [{
+                "brand": p['brand'], 
+                "category": p['category'], 
+                "price": p['price'],
+                "product_id": p['id'],
+                "name": p['name'],
+                "category_name": p['category_name'],
+                "original_price": p['original_price'],
+                "promotion": p['promotion'],
+                "outstanding": p['outstanding'],
+                "spec_product": p['spec_product'],
+                "url_image": p['url_image'],
+                "url": p['url']
+            } for p in products]
             
             catalog_collection.add(ids=ids, documents=documents, metadatas=metadatas)
             print("Đã nạp dữ liệu Catalog vào Vector DB thành công!")
@@ -192,12 +272,10 @@ def init_vector_db():
         print(f"Không thể nạp dữ liệu Catalog vào Vector DB: {e}")
 
     # --- ĐƯA DỮ LIỆU POLICY & FAQ VÀO DB ---
-    # Giả sử bạn có file policy.txt chứa chính sách đổi trả, bảo hành, trả góp...
     try:
         with open('data/raw/policy.txt', 'r', encoding='utf-8') as f:
             policy_text = f.read()
             
-        # Chia nhỏ văn bản chính sách thành các đoạn nhỏ (Chunking) để AI không bị quá tải context
         from langchain_text_splitters import RecursiveCharacterTextSplitter
         text_splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
         chunks = text_splitter.split_text(policy_text)
@@ -207,6 +285,91 @@ def init_vector_db():
         print(f"Đã nạp {len(chunks)} đoạn chính sách vào Vector DB!")
     except FileNotFoundError:
         print("Chưa có file policy.txt, bỏ qua nạp chính sách (hãy bổ sung sau).")
+
+def query_products(query_text, category=None, brand=None, budget=None, n_results=3):
+    """Truy vấn sản phẩm bằng Vector DB kết hợp lọc Metadata (Hybrid RAG)"""
+    try:
+        client, ef = get_vector_client()
+        
+        # Tự động khởi tạo dữ liệu nếu Collection trống trơn
+        try:
+            collection = client.get_collection(name="catalog", embedding_function=ef)
+            if collection.count() == 0:
+                print("Vector DB trống, đang tự động nạp dữ liệu...")
+                init_vector_db()
+                collection = client.get_collection(name="catalog", embedding_function=ef)
+        except Exception:
+            print("Chưa tạo Collection catalog, đang tự động khởi tạo...")
+            init_vector_db()
+            collection = client.get_collection(name="catalog", embedding_function=ef)
+
+        # Chuẩn bị bộ lọc where cho ChromaDB
+        where_clauses = []
+        if category:
+            where_clauses.append({"category": category})
+        if brand:
+            where_clauses.append({"brand": brand.strip().upper()})
+        if budget:
+            where_clauses.append({"price": {"$lte": budget}})
+            
+        where = None
+        if len(where_clauses) == 1:
+            where = where_clauses[0]
+        elif len(where_clauses) > 1:
+            where = {"$and": where_clauses}
+            
+        # Nếu query_text rỗng, dùng tên ngành hàng làm query mặc định
+        search_query = query_text.strip() if query_text else ""
+        if not search_query:
+            if category == 'dien-thoai': search_query = "điện thoại smartphone"
+            elif category == 'laptop': search_query = "máy tính laptop xách tay"
+            elif category == 'may-lanh': search_query = "máy lạnh điều hòa nhiệt độ"
+            elif category == 'tu-lanh': search_query = "tủ lạnh bảo quản thực phẩm"
+            elif category == 'tai-nghe': search_query = "tai nghe bluetooth"
+            else: search_query = "sản phẩm"
+            
+        is_upsell = False
+        results = collection.query(query_texts=[search_query], n_results=n_results, where=where)
+        
+        # TIER 2 Fallback: Nếu lọc theo ngân sách mà trống -> Truy vấn cận biên (Upsell) bằng cách bỏ lọc giá
+        if budget and (not results or not results.get("metadatas") or len(results["metadatas"][0]) == 0):
+            is_upsell = True
+            where_clauses_no_budget = [c for c in where_clauses if "price" not in c]
+            where_no_budget = None
+            if len(where_clauses_no_budget) == 1:
+                where_no_budget = where_clauses_no_budget[0]
+            elif len(where_clauses_no_budget) > 1:
+                where_no_budget = {"$and": where_clauses_no_budget}
+            results = collection.query(query_texts=[search_query], n_results=2, where=where_no_budget)
+            
+        products = []
+        if results and results.get("metadatas") and len(results["metadatas"]) > 0:
+            for meta in results["metadatas"][0]:
+                spec_str = meta.get("spec_product", "")
+                spec_data = None
+                if spec_str:
+                    try:
+                        spec_data = json.loads(spec_str)
+                    except Exception:
+                        spec_data = spec_str
+                
+                products.append({
+                    "product_id": meta.get("product_id"),
+                    "name": meta.get("name"),
+                    "brand": meta.get("brand"),
+                    "category_name": meta.get("category_name"),
+                    "sale_price": meta.get("price"),
+                    "original_price": meta.get("original_price"),
+                    "promotion": meta.get("promotion"),
+                    "outstanding": meta.get("outstanding"),
+                    "spec_product": spec_data,
+                    "url_image": meta.get("url_image", ""),
+                    "url": meta.get("url", "")
+                })
+        return products, is_upsell
+    except Exception as e:
+        print(f"Lỗi truy vấn sản phẩm bằng Vector DB: {e}")
+    return [], False
 
 if __name__ == "__main__":
     init_vector_db()

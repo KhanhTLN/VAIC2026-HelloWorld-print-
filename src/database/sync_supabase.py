@@ -41,17 +41,24 @@ def format_price(val):
 def normalize_category(cat_name):
     if not cat_name:
         return "khac"
-    cat_lower = cat_name.lower()
-    if "điện thoại" in cat_lower or "dien thoai" in cat_lower:
+    cat_lower = cat_name.lower().strip()
+    
+    # Loại trừ phụ kiện và các nhóm hàng phụ trợ trước
+    if any(kw in cat_lower for kw in ["phụ kiện", "phu kien", "ốp", "op", "bao da", "kính cường lực", "dây đeo"]):
+        cleaned_slug = cat_lower.replace(" ", "-")
+        return cleaned_slug
+        
+    if cat_lower == "điện thoại" or cat_lower == "dien thoai":
         return "dien-thoai"
-    if "máy lạnh" in cat_lower or "điều hòa" in cat_lower or "may lanh" in cat_lower or "dieu hoa" in cat_lower:
+    if cat_lower == "máy lạnh" or cat_lower == "may lanh" or cat_lower == "điều hòa" or cat_lower == "dieu hoa":
         return "may-lanh"
-    if "tủ lạnh" in cat_lower or "tu lanh" in cat_lower:
+    if cat_lower == "tủ lạnh" or cat_lower == "tu lanh":
         return "tu-lanh"
-    if "laptop" in cat_lower or "máy tính" in cat_lower or "may tinh" in cat_lower:
+    if cat_lower == "laptop":
         return "laptop"
-    if "tai nghe" in cat_lower or "headphone" in cat_lower:
+    if cat_lower == "loa, tai nghe" or cat_lower == "tai nghe" or cat_lower == "headphone":
         return "tai-nghe"
+    
     # Fallback clean slug
     cleaned_slug = cat_lower.replace(" ", "-")
     return cleaned_slug
