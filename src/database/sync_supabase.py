@@ -11,6 +11,9 @@ if sys.platform.startswith('win'):
 # Connection string của Supabase (sử dụng Direct URL để ổn định kết nối đồng bộ)
 DB_URL = "postgresql://postgres.bdcsgjmmizlbrgnaztto:PhamTheQuyen2005%40@aws-0-ap-northeast-1.pooler.supabase.com:5432/postgres"
 
+def get_db_connection():
+    return psycopg2.connect(DB_URL)
+
 from decimal import Decimal
 import math
 
@@ -35,6 +38,24 @@ def format_price(val):
         return "0đ"
     return f"{price_val:,}".replace(",", ".") + "đ"
 
+def normalize_category(cat_name):
+    if not cat_name:
+        return "khac"
+    cat_lower = cat_name.lower()
+    if "điện thoại" in cat_lower or "dien thoai" in cat_lower:
+        return "dien-thoai"
+    if "máy lạnh" in cat_lower or "điều hòa" in cat_lower or "may lanh" in cat_lower or "dieu hoa" in cat_lower:
+        return "may-lanh"
+    if "tủ lạnh" in cat_lower or "tu lanh" in cat_lower:
+        return "tu-lanh"
+    if "laptop" in cat_lower or "máy tính" in cat_lower or "may tinh" in cat_lower:
+        return "laptop"
+    if "tai nghe" in cat_lower or "headphone" in cat_lower:
+        return "tai-nghe"
+    # Fallback clean slug
+    cleaned_slug = cat_lower.replace(" ", "-")
+    return cleaned_slug
+
 def sync_data():
     print("🔄 Đang kết nối tới Supabase PostgreSQL...")
     try:
@@ -43,19 +64,17 @@ def sync_data():
         
         query = """
             SELECT 
-                p.id, 
+                p.product_id, 
                 p.name, 
-                b.name AS brand, 
-                c.category_code AS category, 
+                p.brand, 
+                c.category_name, 
                 p.sale_price, 
                 p.original_price,
-                p.specifications, 
-                p.description,
-                p.gift_promotion,
-                p.stock
+                p.promotion, 
+                p.outstanding,
+                p.spec_product
             FROM products p
-            LEFT JOIN brands b ON p.brand_id = b.id
-            LEFT JOIN categories c ON p.category_id = c.id
+            LEFT JOIN categories c ON p.category_id = c.category_id
         """
         
         print("📥 Đang tải dữ liệu sản phẩm...")
@@ -66,9 +85,9 @@ def sync_data():
         for row in rows:
             price = safe_int(row['sale_price'])
             
-            # Chuẩn hóa specifications từ JSON sang chuỗi văn bản để AI đọc
+            # Chuẩn hóa specifications (JSONB) từ JSON sang chuỗi văn bản để AI đọc
             specs_str = ""
-            specs_data = row['specifications']
+            specs_data = row['spec_product']
             if specs_data:
                 if isinstance(specs_data, dict):
                     specs_str = " - ".join([f"{k}: {v}" for k, v in specs_data.items()])
@@ -78,28 +97,29 @@ def sync_data():
                     specs_str = str(specs_data)
             
             formatted_price_str = format_price(price)
-            description = row['description'] or ""
+            description = row['outstanding'] or ""
+            normalized_cat = normalize_category(row['category_name'])
             
             # Tạo trường full_text làm giàu ngữ cảnh cho RAG
             full_text = (
                 f"Sản phẩm: {row['name']}. "
                 f"Thương hiệu: {row['brand'] or 'Khác'}. "
-                f"Ngành hàng: {row['category'] or 'Khác'}. "
+                f"Ngành hàng: {row['category_name'] or 'Khác'}. "
                 f"Giá: {formatted_price_str}. "
                 f"Thông số: {specs_str}. "
                 f"Mô tả: {description}"
             )
             
             cleaned_products.append({
-                "id": str(row['id']),
+                "id": str(row['product_id']),
                 "name": row['name'],
                 "brand": (row['brand'] or '').strip().upper(),
-                "category": (row['category'] or '').strip().lower(),
+                "category": normalized_cat,
                 "price": price,
                 "specs": specs_str,
                 "full_text": full_text,
-                "gift_promotion": row['gift_promotion'] or "",
-                "stock": row['stock'] or 0
+                "gift_promotion": row['promotion'] or "",
+                "stock": 10  # Mặc định gán tồn kho là 10 do schema mới không có cột stock
             })
             
         # Ghi đè vào file local cleaned_catalog.json

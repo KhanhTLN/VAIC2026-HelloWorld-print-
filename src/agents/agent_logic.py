@@ -2,6 +2,8 @@ import requests
 import json
 import os
 import re
+from src.database.vector_store import query_policy
+from src.database.sync_supabase import get_db_connection, safe_int, format_price
 
 OLLAMA_URL = "http://localhost:11434/api/chat"
 MODEL_NAME = "qwen2.5:3b" # Thay bằng qwen2.5:1.5b hoặc bản bạn đã tải thành công
@@ -137,6 +139,263 @@ def analyze_intent_fast(user_message):
 
 # Đã chuyển sang lấy Tồn kho và Khuyến mãi thật 100% trực tiếp từ Database thông qua sync_supabase.py
 
+# Đã chuyển sang lấy Tồn kho và Khuyến mãi thật 100% trực tiếp từ Database thông qua sync_supabase.py
+
+def db_search_products(category, budget, user_message):
+    context = ""
+    is_upsell = False
+    top_relevance = 0
+    
+    if not category:
+        return context, is_upsell, top_relevance
+        
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        # Build SQL condition based on category
+        sql_cond = ""
+        if category == 'may-lanh':
+            sql_cond = "(c.category_name = 'Máy lạnh' OR p.name ILIKE '%%máy lạnh%%' OR p.name ILIKE '%%điều hòa%%')"
+        elif category == 'dien-thoai':
+            sql_cond = "(c.category_name = 'Điện thoại' OR p.name ILIKE '%%điện thoại%%' OR p.name ILIKE '%%iphone%%')"
+        elif category == 'tu-lanh':
+            sql_cond = "(c.category_name = 'Tủ lạnh' OR p.name ILIKE '%%tủ lạnh%%' OR p.name ILIKE '%%tủ mát%%' OR p.name ILIKE '%%tủ đông%%')"
+        elif category == 'laptop':
+            sql_cond = "(c.category_name = 'Laptop' OR p.name ILIKE '%%laptop%%' OR p.name ILIKE '%%máy tính%%')"
+        elif category == 'tai-nghe':
+            sql_cond = "(c.category_name = 'Loa, Tai nghe' OR p.name ILIKE '%%tai nghe%%' OR p.name ILIKE '%%airpods%%')"
+        
+        if not sql_cond:
+            cur.close()
+            conn.close()
+            return context, is_upsell, top_relevance
+            
+        # 1. Trích xuất các từ khóa tìm kiếm có nghĩa từ câu hỏi khách hàng (giữ dấu gạch ngang để khớp model code)
+        keywords = []
+        cleaned = re.sub(r'[^\w\s\-]', ' ', user_message.lower())
+        words = cleaned.split()
+        stop_words = {
+            'tôi', 'muốn', 'mua', 'tư', 'vấn', 'cho', 'giá', 'dưới', 'khoảng', 'tầm', 
+            'có', 'không', 'nào', 'ở', 'tại', 'tìm', 'giúp', 'cần', 'dòng', 'sản', 'phẩm',
+            'loại', 'hiệu', 'máy', 'điện', 'thoại', 'lạnh', 'tủ', 'đồ', 'tai', 'nghe', 'laptop'
+        }
+        for w in words:
+            if w in stop_words:
+                continue
+            if budget:
+                budget_str = str(budget)
+                if budget_str in w or (budget // 1000000) == w:
+                    continue
+            if w.isdigit() and len(w) >= 3:
+                continue
+            if len(w) >= 2 or w.isdigit() or '-' in w:
+                    keywords.append(w)
+
+        # Xây dựng công thức tính độ liên quan và điều kiện lọc
+        relevance_score_expr = "0"
+        match_cond = "1=1"
+        
+        if keywords:
+            score_parts = []
+            match_parts = []
+            for kw in keywords:
+                escaped_kw = kw.replace("'", "''")
+                
+                # Kiểm tra xem từ khóa này có phải là ứng viên của Model Code không
+                is_model_code = '-' in kw or (any(c.isdigit() for c in kw) and any(c.isalpha() for c in kw) and len(kw) >= 5)
+                
+                if is_model_code:
+                    score_parts.append(f"""
+                        (CASE 
+                            WHEN p.product_id = '{escaped_kw}' OR p.product_code = '{escaped_kw}' THEN 50
+                            WHEN p.name ILIKE '%%{escaped_kw}%%' THEN 30
+                            WHEN p.outstanding ILIKE '%%{escaped_kw}%%' THEN 10
+                            WHEN p.spec_product::text ILIKE '%%{escaped_kw}%%' THEN 5
+                            ELSE 0 
+                        END)
+                    """)
+                else:
+                    score_parts.append(f"""
+                        (CASE 
+                            WHEN p.product_id = '{escaped_kw}' OR p.product_code = '{escaped_kw}' THEN 20
+                            WHEN p.name ILIKE '%%{escaped_kw}%%' THEN 2
+                            WHEN p.outstanding ILIKE '%%{escaped_kw}%%' THEN 1
+                            ELSE 0 
+                        END)
+                    """)
+                
+                match_parts.append(f"(p.product_id = '{escaped_kw}' OR p.product_code = '{escaped_kw}' OR p.name ILIKE '%%{escaped_kw}%%' OR p.outstanding ILIKE '%%{escaped_kw}%%' OR p.spec_product::text ILIKE '%%{escaped_kw}%%')")
+            
+            relevance_score_expr = " + ".join(score_parts)
+            match_cond = "(" + " OR ".join(match_parts) + ")"
+
+        # TIER 1: Truy vấn theo danh mục, từ khóa và ngân sách
+        params = []
+        budget_cond = ""
+        if budget:
+            budget_cond = " AND p.sale_price <= %s"
+            params.append(budget)
+            
+        query = f"""
+            SELECT 
+                p.product_id, 
+                p.name, 
+                p.brand, 
+                c.category_name, 
+                p.sale_price, 
+                p.original_price,
+                p.promotion, 
+                p.outstanding,
+                p.spec_product,
+                ({relevance_score_expr}) as relevance
+            FROM products p
+            LEFT JOIN categories c ON p.category_id = c.category_id
+            WHERE {sql_cond} AND {match_cond}{budget_cond}
+            ORDER BY relevance DESC, p.sale_price DESC
+        """
+        print(f"\n[SQL TIER 1 - EXACT SEARCH]:\n{cur.mogrify(query, params).decode('utf-8')}\n")
+        cur.execute(query, params)
+        rows = cur.fetchall()
+        
+        # TIER 2: Nếu có ngân sách nhưng không tìm thấy kết quả khớp từ khóa -> Tìm bán hàng cận biên khớp từ khóa
+        if budget and not rows:
+            is_upsell = True
+            query_upsell = f"""
+                SELECT 
+                    p.product_id, 
+                    p.name, 
+                    p.brand, 
+                    c.category_name, 
+                    p.sale_price, 
+                    p.original_price,
+                    p.promotion, 
+                    p.outstanding,
+                    p.spec_product,
+                    ({relevance_score_expr}) as relevance
+                FROM products p
+                LEFT JOIN categories c ON p.category_id = c.category_id
+                WHERE {sql_cond} AND {match_cond}
+                ORDER BY relevance DESC, p.sale_price ASC
+                LIMIT 2
+            """
+            print(f"\n[SQL TIER 2 - UPSELL SEARCH]:\n{cur.mogrify(query_upsell).decode('utf-8')}\n")
+            cur.execute(query_upsell)
+            rows = cur.fetchall()
+            
+        # TIER 3: Nếu không tìm thấy kết quả theo từ khóa -> Bỏ điều kiện từ khóa, chỉ lọc theo danh mục & ngân sách
+        if not rows:
+            params = []
+            budget_cond = ""
+            if budget:
+                budget_cond = " AND p.sale_price <= %s"
+                params.append(budget)
+            query_fallback = f"""
+                SELECT 
+                    p.product_id, 
+                    p.name, 
+                    p.brand, 
+                    c.category_name, 
+                    p.sale_price, 
+                    p.original_price,
+                    p.promotion, 
+                    p.outstanding,
+                    p.spec_product,
+                    0 as relevance
+                FROM products p
+                LEFT JOIN categories c ON p.category_id = c.category_id
+                WHERE {sql_cond}{budget_cond}
+                ORDER BY p.sale_price DESC
+            """
+            print(f"\n[SQL TIER 3 - FALLBACK CATEGORY BUDGET]:\n{cur.mogrify(query_fallback, params).decode('utf-8')}\n")
+            cur.execute(query_fallback, params)
+            rows = cur.fetchall()
+            
+        # TIER 4: Nếu bỏ từ khóa và lọc theo danh mục & ngân sách vẫn trống -> Bán hàng cận biên danh mục
+        if budget and not rows:
+            is_upsell = True
+            query_final_fallback = f"""
+                SELECT 
+                    p.product_id, 
+                    p.name, 
+                    p.brand, 
+                    c.category_name, 
+                    p.sale_price, 
+                    p.original_price,
+                    p.promotion, 
+                    p.outstanding,
+                    p.spec_product,
+                    0 as relevance
+                FROM products p
+                LEFT JOIN categories c ON p.category_id = c.category_id
+                WHERE {sql_cond}
+                ORDER BY p.sale_price ASC
+                LIMIT 2
+            """
+            print(f"\n[SQL TIER 4 - FINAL FALLBACK UPSELL]:\n{cur.mogrify(query_final_fallback).decode('utf-8')}\n")
+            cur.execute(query_final_fallback)
+            rows = cur.fetchall()
+        else:
+            rows = rows[:3]
+            
+        if rows:
+            top_relevance = rows[0][9]
+            
+        # 3. Xây dựng context
+        context_list = []
+        for row in rows:
+            p_id = str(row[0])
+            name = row[1]
+            brand = (row[2] or '').strip().upper()
+            cat_name = row[3] or 'Khác'
+            price = safe_int(row[4])
+            original_price = safe_int(row[5])
+            promotion = row[6] or ""
+            outstanding = row[7] or ""
+            spec_product = row[8]
+            
+            # Format specs to string
+            specs_str = ""
+            if spec_product:
+                if isinstance(spec_product, dict):
+                    specs_str = " - ".join([f"{k}: {v}" for k, v in spec_product.items()])
+                elif isinstance(spec_product, list):
+                    specs_str = " - ".join([str(item) for item in spec_product])
+                else:
+                    specs_str = str(spec_product)
+                    
+            formatted_price_str = format_price(price)
+            
+            # Tạo full_text
+            full_text = (
+                f"Sản phẩm: {name}. "
+                f"Thương hiệu: {brand or 'Khác'}. "
+                f"Ngành hàng: {cat_name}. "
+                f"Giá: {formatted_price_str}. "
+                f"Thông số: {specs_str}. "
+                f"Mô tả: {outstanding}"
+            )
+            
+            # Tình trạng tồn kho mặc định
+            stock_info = "Tình trạng tồn kho: Còn hàng (Số lượng: 10 sản phẩm)"
+            
+            # Khuyến mãi
+            if promotion and promotion.strip():
+                promo_info = f"Khuyến mãi áp dụng: {promotion}"
+            else:
+                promo_info = "Khuyến mãi áp dụng: Không có chương trình khuyến mãi nào"
+                
+            enriched_text = f"{full_text}. {stock_info}. {promo_info}."
+            context_list.append(enriched_text)
+            
+        context = "\n".join(context_list)
+        cur.close()
+        conn.close()
+    except Exception as e:
+        context = f"Lỗi đọc kho dữ liệu từ DB: {str(e)}"
+        
+    return context, is_upsell, top_relevance
+
 def generate_advisor_response_stream(user_message, history=None):
     """Luồng điều phối chính dạng Generator (truyền tải dữ liệu luồng về UI)"""
     # 1. Tích lũy intent từ lịch sử chat để duy trì ngữ cảnh trạng thái (Stateful)
@@ -153,33 +412,54 @@ def generate_advisor_response_stream(user_message, history=None):
         for msg in history:
             if msg.get("role") == "user":
                 prev_intent = analyze_intent_fast(msg.get("content", ""))
-                if prev_intent.get("category"):
-                    accumulated_intent["category"] = prev_intent["category"]
-                if prev_intent.get("budget"):
-                    accumulated_intent["budget"] = prev_intent["budget"]
-                if prev_intent.get("room_size"):
-                    accumulated_intent["room_size"] = prev_intent["room_size"]
-                if prev_intent.get("family_members"):
-                    accumulated_intent["family_members"] = prev_intent["family_members"]
-                if prev_intent.get("laptop_needs"):
-                    accumulated_intent["laptop_needs"] = prev_intent["laptop_needs"]
-                if prev_intent.get("headphone_needs"):
-                    accumulated_intent["headphone_needs"] = prev_intent["headphone_needs"]
+                # Nếu phát hiện đổi category, reset toàn bộ các tham số tích lũy của category cũ
+                if prev_intent.get("category") and prev_intent["category"] != accumulated_intent["category"]:
+                    accumulated_intent = {
+                        "category": prev_intent["category"], 
+                        "budget": None, 
+                        "room_size": None,
+                        "family_members": None,
+                        "laptop_needs": None,
+                        "headphone_needs": None
+                    }
+                else:
+                    if prev_intent.get("category"):
+                        accumulated_intent["category"] = prev_intent["category"]
+                    if prev_intent.get("budget"):
+                        accumulated_intent["budget"] = prev_intent["budget"]
+                    if prev_intent.get("room_size"):
+                        accumulated_intent["room_size"] = prev_intent["room_size"]
+                    if prev_intent.get("family_members"):
+                        accumulated_intent["family_members"] = prev_intent["family_members"]
+                    if prev_intent.get("laptop_needs"):
+                        accumulated_intent["laptop_needs"] = prev_intent["laptop_needs"]
+                    if prev_intent.get("headphone_needs"):
+                        accumulated_intent["headphone_needs"] = prev_intent["headphone_needs"]
                     
     # Cập nhật thêm từ tin nhắn hiện tại
     current_intent = analyze_intent_fast(user_message)
-    if current_intent.get("category"):
-        accumulated_intent["category"] = current_intent["category"]
-    if current_intent.get("budget"):
-        accumulated_intent["budget"] = current_intent["budget"]
-    if current_intent.get("room_size"):
-        accumulated_intent["room_size"] = current_intent["room_size"]
-    if current_intent.get("family_members"):
-        accumulated_intent["family_members"] = current_intent["family_members"]
-    if current_intent.get("laptop_needs"):
-        accumulated_intent["laptop_needs"] = current_intent["laptop_needs"]
-    if current_intent.get("headphone_needs"):
-        accumulated_intent["headphone_needs"] = current_intent["headphone_needs"]
+    if current_intent.get("category") and current_intent["category"] != accumulated_intent["category"]:
+        accumulated_intent = {
+            "category": current_intent["category"], 
+            "budget": None, 
+            "room_size": None,
+            "family_members": None,
+            "laptop_needs": None,
+            "headphone_needs": None
+        }
+    else:
+        if current_intent.get("category"):
+            accumulated_intent["category"] = current_intent["category"]
+        if current_intent.get("budget"):
+            accumulated_intent["budget"] = current_intent["budget"]
+        if current_intent.get("room_size"):
+            accumulated_intent["room_size"] = current_intent["room_size"]
+        if current_intent.get("family_members"):
+            accumulated_intent["family_members"] = current_intent["family_members"]
+        if current_intent.get("laptop_needs"):
+            accumulated_intent["laptop_needs"] = current_intent["laptop_needs"]
+        if current_intent.get("headphone_needs"):
+            accumulated_intent["headphone_needs"] = current_intent["headphone_needs"]
         
     category = accumulated_intent.get('category')
     budget = accumulated_intent.get('budget')
@@ -188,6 +468,26 @@ def generate_advisor_response_stream(user_message, history=None):
     laptop_needs = accumulated_intent.get('laptop_needs')
     headphone_needs = accumulated_intent.get('headphone_needs')
     
+    # Nhận diện ý định hỏi về chính sách
+    policy_keywords = [
+        "chính sách", "chinh sach", "đổi trả", "doi tra", "bảo hành", "bao hanh", 
+        "giao hàng", "giao hang", "trả góp", "tra gop", "hoàn tiền", "hoan tien", 
+        "phí đổi", "phi doi", "lắp đặt", "lap dat", "tổng đài", "tong dai", 
+        "khiếu nại", "khieu nai", "phục vụ", "phuc vu", "từ chối", "tu choi", 
+        "hạn chế", "han che", "quy định", "quy dinh", "điều khoản", "dieu khoan"
+    ]
+    cleaned_msg = user_message.lower()
+    is_policy_query = any(kw in cleaned_msg for kw in policy_keywords)
+    
+    policy_context = ""
+    if is_policy_query:
+        policy_chunks = query_policy(user_message, n_results=3)
+        if policy_chunks:
+            policy_context = "\n".join([f"- {chunk}" for chunk in policy_chunks])
+    
+    # Thực hiện truy vấn sản phẩm từ Database trước để xem có khớp sản phẩm cụ thể hay không
+    context, is_upsell, top_relevance = db_search_products(category, budget, user_message)
+
     # Xây dựng danh sách tin nhắn hội thoại cho API chat
     conversation_messages = []
     if history:
@@ -198,45 +498,49 @@ def generate_advisor_response_stream(user_message, history=None):
     # Không cần dựng history_context thủ công nữa vì đã dùng API Chat
     history_context = ""
 
-    # Đọc nhanh catalog để kiểm tra thực tế trong kho có sản phẩm thuộc ngành hàng này hay không
-    catalog_path = 'data/processed/cleaned_catalog.json'
-    catalog = []
-    if os.path.exists(catalog_path):
-        try:
-            with open(catalog_path, 'r', encoding='utf-8') as f:
-                catalog = json.load(f)
-        except:
-            pass
-
+    # Đọc nhanh catalog từ Database để kiểm tra thực tế trong kho có sản phẩm thuộc ngành hàng này hay không
     has_category_products = False
-    if category and catalog:
-        for p in catalog:
-            p_cat = p.get('category', '')
-            p_name_lower = p.get('name', '').lower()
+    if category:
+        try:
+            conn = get_db_connection()
+            cur = conn.cursor()
             
-            is_match = False
-            if category == 'may-lanh' and (p_cat == 'may-lanh' or 'máy lạnh' in p_name_lower or 'điều hòa' in p_name_lower):
-                is_match = True
-            elif category == 'dien-thoai' and (p_cat == 'dien-thoai' or 'điện thoại' in p_name_lower or 'iphone' in p_name_lower or 'samsung' in p_name_lower):
-                is_match = True
-            elif category == 'tu-lanh' and (p_cat == 'tu-lanh' or p_cat == '40' or 'tủ lạnh' in p_name_lower or 'tủ mát' in p_name_lower or 'tủ đông' in p_name_lower):
-                is_match = True
-            elif category == 'laptop' and (p_cat == 'laptop' or p_cat == 'laptop-7a2c5001' or 'máy tính' in p_name_lower or 'laptop' in p_name_lower):
-                is_match = True
-            elif category == 'tai-nghe' and (p_cat == 'tai-nghe' or 'tai nghe' in p_name_lower or 'airpods' in p_name_lower):
-                is_match = True
+            sql_cond = ""
+            if category == 'may-lanh':
+                sql_cond = "(c.category_name = 'Máy lạnh' OR p.name ILIKE '%%máy lạnh%%' OR p.name ILIKE '%%điều hòa%%')"
+            elif category == 'dien-thoai':
+                sql_cond = "(c.category_name = 'Điện thoại' OR p.name ILIKE '%%điện thoại%%' OR p.name ILIKE '%%iphone%%')"
+            elif category == 'tu-lanh':
+                sql_cond = "(c.category_name = 'Tủ lạnh' OR p.name ILIKE '%%tủ lạnh%%' OR p.name ILIKE '%%tủ mát%%' OR p.name ILIKE '%%tủ đông%%')"
+            elif category == 'laptop':
+                sql_cond = "(c.category_name = 'Laptop' OR p.name ILIKE '%%laptop%%' OR p.name ILIKE '%%máy tính%%')"
+            elif category == 'tai-nghe':
+                sql_cond = "(c.category_name = 'Loa, Tai nghe' OR p.name ILIKE '%%tai nghe%%' OR p.name ILIKE '%%airpods%%')"
             
-            if is_match:
-                has_category_products = True
-                break
+            if sql_cond:
+                query = f"""
+                    SELECT COUNT(*) 
+                    FROM products p
+                    LEFT JOIN categories c ON p.category_id = c.category_id
+                    WHERE {sql_cond}
+                """
+                print(f"\n[SQL CHECK CATEGORY]:\n{query}\n")
+                cur.execute(query)
+                count = cur.fetchone()[0]
+                has_category_products = (count > 0)
+                
+            cur.close()
+            conn.close()
+        except Exception as e:
+            print(f"Lỗi kiểm tra danh mục từ DB: {e}")
 
     # Nếu phát hiện ngành hàng đó trống trơn trong DB -> Báo hết hàng trực tiếp tại Python (Bypass LLM)
     if category and not has_category_products:
         yield "Dạ, hiện tại ngành hàng này đang tạm hết hàng trên toàn hệ thống siêu thị Điện Máy Xanh. Anh/chị có thể tham khảo các dòng sản phẩm khác như Tủ lạnh, Laptop, Máy rửa chén đang có sẵn rất nhiều sản phẩm và khuyến mãi lớn ạ!"
         return
 
-    # Nếu không phát hiện ngành hàng nào, khách đang chào hỏi hoặc nói chuyện chung chung
-    if not category:
+    # Nếu không phát hiện ngành hàng nào và không hỏi về chính sách, khách đang chào hỏi hoặc nói chuyện chung chung
+    if not category and not is_policy_query:
         system_greeting = """Bạn là một nhân viên tư vấn người Việt Nam chuyên nghiệp tại siêu thị Điện Máy Xanh.
         Khách hàng chưa có nhu cầu mua sắm cụ thể hoặc đang chào hỏi bạn.
         Hãy gửi lời chào thân thiện, nhiệt tình và hỏi xem khách hàng đang cần tìm kiếm dòng sản phẩm nào trong các nhóm sau:
@@ -273,9 +577,11 @@ def generate_advisor_response_stream(user_message, history=None):
                 if any(phrase in content for phrase in ["bao nhiêu m²", "bao nhiêu m2", "bao nhiêu người", "công việc gì là chủ yếu", "ngân sách dự kiến", "nhét tai True Wireless"]):
                     clarify_count += 1
 
-    # XÁC ĐỊNH CHỈ THỊ HỎI LÀM RÕ (Bypass nếu khách từ chối hoặc đã hỏi rồi)
+    # XÁC ĐỊNH CHỈ THỊ HỎI LÀM RÕ (Bypass nếu khách từ chối, đã hỏi rồi, đang hỏi về chính sách, hoặc đã xác định được sản phẩm cụ thể với top_relevance >= 4)
     clarify_instruction = ""
-    if not refused_clarify and clarify_count < 1:
+    bypass_clarify = (top_relevance >= 4)
+    
+    if not bypass_clarify and not refused_clarify and clarify_count < 1 and not is_policy_query:
         if category == 'may-lanh' and not room_size and not budget:
             clarify_instruction = "Khách hàng muốn mua máy lạnh nhưng chưa cung cấp diện tích phòng hoặc ngân sách. Bạn BẮT BUỘC phải hỏi khéo léo về diện tích phòng (m2) để tư vấn công suất máy lạnh (1 HP hay 1.5 HP) phù hợp."
         elif category == 'tu-lanh' and not family_members and not budget:
@@ -289,89 +595,23 @@ def generate_advisor_response_stream(user_message, history=None):
 
     if clarify_instruction:
         system_clarify = f"""Bạn là một nhân viên tư vấn người Việt Nam chuyên nghiệp tại siêu thị Điện Máy Xanh.
+        LƯU Ý QUAN TRỌNG: Khách hàng vừa mới chuyển sang hỏi về ngành hàng '{category}' (không còn hỏi về ngành hàng cũ ở các lượt chat trước). Bạn BẮT BUỘC phải tập trung 100% vào ngành hàng mới '{category}' này.
         Nhiệm vụ: {clarify_instruction}
         Hãy phản hồi lịch sự, chào đón khách hàng nồng nhiệt và đặt câu hỏi hỏi ngược khéo léo để lấy thông tin. 
-        Bạn có thể nêu một vài thương hiệu nổi tiếng mà Điện Máy Xanh đang kinh doanh cho ngành hàng này để làm tăng tính hấp dẫn.
+        Bạn có thể nêu một vài thương hiệu nổi tiếng mà Điện Máy Xanh đang kinh doanh cho ngành hàng mới này để làm tăng tính hấp dẫn.
+        TUYỆT ĐỐI KHÔNG được nhắc lại hoặc nhầm lẫn sang các sản phẩm/thương hiệu/mức giá của ngành hàng cũ trong lịch sử trò chuyện (như điện thoại cũ).
         BẮT BUỘC trả lời ngắn gọn, thân thiện, 100% bằng Tiếng Việt."""
         
         for chunk in call_local_llm_stream(system_clarify, messages=conversation_messages):
             yield chunk
         return
 
-    # 3. LUỒNG RAG + HARD FILTER (Đọc file catalog sạch từ Bước 1)
-    catalog_path = 'data/processed/cleaned_catalog.json'
-    context = ""
-    matched_products = []
-    is_upsell = False
-    
-    if os.path.exists(catalog_path):
-        try:
-            with open(catalog_path, 'r', encoding='utf-8') as f:
-                catalog = json.load(f)
-                
-            # Lọc cứng bằng code Python để triệt tiêu Hallucination giá tiền
-            for p in catalog:
-                p_cat = p['category']
-                p_name_lower = p['name'].lower()
-                
-                is_match = False
-                if category == 'may-lanh' and (p_cat == 'may-lanh' or 'máy lạnh' in p_name_lower or 'điều hòa' in p_name_lower):
-                    is_match = True
-                elif category == 'dien-thoai' and (p_cat == 'dien-thoai' or 'điện thoại' in p_name_lower or 'iphone' in p_name_lower or 'samsung' in p_name_lower):
-                    is_match = True
-                elif category == 'tu-lanh' and (p_cat == 'tu-lanh' or p_cat == '40' or 'tủ lạnh' in p_name_lower or 'tủ mát' in p_name_lower or 'tủ đông' in p_name_lower):
-                    is_match = True
-                elif category == 'laptop' and (p_cat == 'laptop' or p_cat == 'laptop-7a2c5001' or 'máy tính' in p_name_lower or 'laptop' in p_name_lower):
-                    is_match = True
-                elif category == 'tai-nghe' and (p_cat == 'tai-nghe' or 'tai nghe' in p_name_lower or 'airpods' in p_name_lower):
-                    is_match = True
-                
-                if is_match:
-                    all_matched_products.append(p)
-            
-            # Lọc theo ngân sách nếu có
-            final_products = []
-            if budget:
-                for p in all_matched_products:
-                    if p['price'] <= budget:
-                        final_products.append(p)
-            else:
-                final_products = all_matched_products
-                
-            # Nếu khách đặt ngân sách nhưng không có sản phẩm nào rẻ hơn ngân sách -> Kích hoạt Up-selling Fallback
-            is_upsell = False
-            if budget and not final_products and all_matched_products:
-                is_upsell = True
-                # Sắp xếp lấy 2 sản phẩm rẻ nhất làm phương án thay thế gần nhất
-                all_matched_products.sort(key=lambda x: x['price'])
-                final_products = all_matched_products[:2]
-            
-            # Lấy tối đa 3 sản phẩm làm context
-            context_list = []
-            for p in final_products[:3]:
-                # Lấy dữ liệu tồn kho thật 100% từ Database
-                stock_count = p.get('stock', 0)
-                if stock_count > 0:
-                    stock_info = f"Tình trạng tồn kho: Còn hàng (Số lượng: {stock_count} sản phẩm)"
-                else:
-                    stock_info = "Tình trạng tồn kho: Hết hàng"
-                
-                # Lấy dữ liệu khuyến mãi thật 100% từ Database
-                promo_text = p.get('gift_promotion', '')
-                if promo_text and promo_text.strip():
-                    promo_info = f"Khuyến mãi áp dụng: {promo_text}"
-                else:
-                    promo_info = "Khuyến mãi áp dụng: Không có chương trình khuyến mãi nào"
-                
-                enriched_text = f"{p['full_text']}. {stock_info}. {promo_info}."
-                context_list.append(enriched_text)
-                
-            context = "\n".join(context_list)
-        except Exception as e:
-            context = f"Lỗi đọc kho dữ liệu: {str(e)}"
-    
+    # 3. LUỒNG RAG + HARD FILTER (Duy trì logic hiển thị context dự phòng)
     if not context or "Không tìm thấy" in context:
-        context = "Hiện tại trong kho tạm hết dòng sản phẩm khớp chính xác với ngân sách này của anh chị."
+        if category:
+            context = "Hiện tại trong kho tạm hết dòng sản phẩm khớp chính xác với ngân sách này của anh chị."
+        else:
+            context = ""
 
     # Tạo chỉ dẫn khéo léo bán hàng cận biên
     upsell_instruction = ""
@@ -389,23 +629,38 @@ def generate_advisor_response_stream(user_message, history=None):
     elif category == 'tai-nghe' and not headphone_needs:
         extra_clarify = "LƯU Ý BẮT BUỘC: Khách hàng chưa cho biết kiểu dáng tai nghe. Hãy đề xuất sản phẩm phù hợp ngân sách và hỏi thêm về kiểu dáng tai nghe yêu thích (nhét tai True Wireless hay chụp tai Over-ear) để tư vấn chuẩn nhất."
 
+    policy_section = ""
+    if is_policy_query and policy_context:
+        policy_section = f"""
+    ---
+    DỮ LIỆU CHÍNH SÁCH ĐIỆN MÁY XANH (CÓ THẬT):
+    {policy_context}
+    ---
+    QUY TẮC TRẢ LỜI CHÍNH SÁCH:
+    - Hãy dựa vào dữ liệu chính sách ở trên để trả lời câu hỏi của khách hàng về chính sách một cách chính xác nhất.
+    - Tuyệt đối không tự bịa đặt ra các quy định chính sách không có trong tài liệu.
+    - Nếu không tìm thấy thông tin chính sách liên quan trong dữ liệu trên, hãy hướng dẫn khách hàng liên hệ trực tiếp tổng đài 1900.232.461 để được hỗ trợ nhanh nhất.
+        """
+
     # 4. PROMPT DỊCH THUẬT BÌNH DÂN & TRADE-OFF (Ăn điểm đặc thù 20%)
     system_advisor = f"""Bạn là một nhân viên tư vấn người Việt Nam chuyên nghiệp tại siêu thị Điện Máy Xanh.
     Hãy dùng tập dữ liệu sản phẩm CÓ THẬT sau đây để tư vấn cho khách:
     ---
     {context}
     ---
+    {policy_section}
+    
     QUY TẮC TƯ VẤN BẮT BUỘC SỐNG CÒN:
     1. BẮT BUỘC TRẢ LỜI BẰNG TIẾNG VIỆT 100%. TUYỆT ĐỐI KHÔNG dùng tiếng Trung, không dùng chữ Hán.
-    2. Chỉ được dùng thông tin sản phẩm, giá bán, tình trạng tồn kho và khuyến mãi có trong dữ liệu ở trên để tư vấn. KHÔNG TỰ BỊA SẢN PHẨM, GIÁ, THÔNG SỐ, KHUYẾN MÃI HOẶC TỒN KHO. Nếu dữ liệu ở trên trống hoặc báo hết hàng, bạn BẮT BUỘC phải thông báo thành thật rằng sản phẩm đang tạm hết hàng trên hệ thống và KHÔNG giới thiệu bất kỳ sản phẩm nào khác ngoài danh sách.
-    3. Không dùng từ ngữ kỹ thuật phức tạp (như Inverter, HP, BTU). Hãy dịch sang ngôn ngữ bình dân (Ví dụ: 'Máy chạy siêu êm ban đêm', 'Tiết kiệm tiền điện cuối tháng', 'Làm mát nhanh sâu').
-    4. Luôn nêu rõ ưu và nhược điểm (Trade-off) giữa các lựa chọn để khách hàng dễ ra quyết định.
-    5. BẮT BUỘC THÔNG BÁO cụ thể cho khách hàng về Tình trạng tồn kho thực tế và các chương trình Khuyến mãi/Quà tặng đi kèm của từng sản phẩm dựa trên thông tin thực tế được cung cấp.
-    6. ĐỘ DÀI VÀ PHONG CÁCH PHẢN HỒI: Hãy phản hồi cực kỳ ngắn gọn, cô đọng, giới hạn câu trả lời dưới 120-150 từ. Trình bày dưới dạng các đầu dòng rõ ràng để giúp phản hồi sinh ra tức thì (vì chạy cục bộ trên CPU).
+    2. Chỉ được dùng thông tin sản phẩm, giá bán, tình trạng tồn kho và khuyến mãi có trong dữ liệu ở trên để tư vấn. KHÔNG TỰ BỊA SẢN PHẨM, GIÁ, THÔNG SỐ, KHUYẾN MÃI HOẶC TỒN KHO. Nếu dữ liệu ở trên trống hoặc báo hết hàng (và câu hỏi không phải về chính sách), bạn BẮT BUỘC phải thông báo thành thật rằng sản phẩm đang tạm hết hàng trên hệ thống và KHÔNG giới thiệu bất kỳ sản phẩm nào khác ngoài danh sách.
+    3. TUYỆT ĐỐI KHÔNG trộn lẫn thông tin hoặc lấy các sản phẩm cũ trong lịch sử trò chuyện (ví dụ: các dòng điện thoại đã thảo luận ở lượt chat trước) để giới thiệu hay chế biến thành sản phẩm của danh mục mới (ví dụ: tủ lạnh). Mỗi lượt phản hồi chỉ được dùng đúng các sản phẩm được liệt kê trong phần context ở trên. Nếu context chỉ có 1 tủ lạnh Sharp, chỉ tư vấn duy nhất tủ lạnh Sharp đó, tuyệt đối không được tự bịa ra tủ lạnh Samsung sử dụng camera hay các thông số điện thoại từ lịch sử.
+    4. Không dùng từ ngữ kỹ thuật phức tạp (như Inverter, HP, BTU). Hãy dịch sang ngôn ngữ bình dân (Ví dụ: 'Máy chạy siêu êm ban đêm', 'Tiết kiệm tiền điện cuối tháng', 'Làm mát nhanh sâu').
+    5. Luôn nêu rõ ưu và nhược điểm (Trade-off) giữa các lựa chọn để khách hàng dễ ra quyết định.
+    6. BẮT BUỘC THÔNG BÁO cụ thể cho khách hàng về Tình trạng tồn kho thực tế và các chương trình Khuyến mãi/Quà tặng đi kèm của từng sản phẩm dựa trên thông tin thực tế được cung cấp.
+    7. ĐỘ DÀI VÀ PHONG CÁCH PHẢN HỒI: Hãy phản hồi cực kỳ ngắn gọn, cô đọng, giới hạn câu trả lời dưới 120-150 từ. Trình bày dưới dạng các đầu dòng rõ ràng để giúp phản hồi sinh ra tức thì (vì chạy cục bộ trên CPU).
     
     {upsell_instruction}
     {extra_clarify}
-    
     Hãy bắt đầu bằng một lời chào lịch sự thân thiện."""
 
     for chunk in call_local_llm_stream(system_advisor, messages=conversation_messages):
