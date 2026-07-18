@@ -14,7 +14,7 @@ class JsonbFilterBuilderTests(unittest.TestCase):
             limit=20,
         )
 
-        self.assertIn("jsonb_extract_path_text(p.specifications", sql)
+        self.assertIn("jsonb_extract_path_text(p.spec_product", sql)
         self.assertIn("p.sale_price <= %s", sql)
         self.assertIn("LIMIT 20", sql)
         self.assertIn("%Laptop%", params)

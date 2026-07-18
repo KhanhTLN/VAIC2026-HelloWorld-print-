@@ -22,7 +22,7 @@ class ProductRepository:
 
         brand = filters.get("brand")
         if brand:
-            where_parts.append("b.name ILIKE %s")
+            where_parts.append("p.brand ILIKE %s")
             params.append(f"%{brand}%")
 
         min_price = filters.get("min_price")
@@ -39,34 +39,33 @@ class ProductRepository:
         for key, val in specs.items():
             if isinstance(val, dict):
                 if "min" in val:
-                    where_parts.append("(jsonb_extract_path_text(p.specifications, %s))::numeric >= %s")
+                    where_parts.append("(jsonb_extract_path_text(p.spec_product, %s))::numeric >= %s")
                     params.extend([key, val["min"]])
                 if "max" in val:
-                    where_parts.append("(jsonb_extract_path_text(p.specifications, %s))::numeric <= %s")
+                    where_parts.append("(jsonb_extract_path_text(p.spec_product, %s))::numeric <= %s")
                     params.extend([key, val["max"]])
             elif isinstance(val, (int, float)):
-                where_parts.append("(jsonb_extract_path_text(p.specifications, %s))::numeric >= %s")
+                where_parts.append("(jsonb_extract_path_text(p.spec_product, %s))::numeric >= %s")
                 params.extend([key, val])
             else:
-                where_parts.append("jsonb_extract_path_text(p.specifications, %s) ILIKE %s")
+                where_parts.append("jsonb_extract_path_text(p.spec_product, %s) ILIKE %s")
                 params.extend([key, f"%{val}%"])
 
         sql = f"""
             SELECT
                 p.id,
                 p.name,
-                b.name AS brand_name,
+                p.brand AS brand_name,
                 c.name AS category_name,
                 p.sale_price,
                 p.original_price,
-                p.rating,
-                p.review_count,
-                p.stock,
-                p.gift_promotion,
-                p.description,
-                p.specifications
+                p.rating_vote AS rating,
+                0 AS review_count,
+                0 AS stock,
+                p.promotion AS gift_promotion,
+                p.warranty_policy AS description,
+                p.spec_product AS specifications
             FROM products p
-            LEFT JOIN brands b ON p.brand_id = b.id
             LEFT JOIN categories c ON p.category_id = c.id
             WHERE {' AND '.join(where_parts)}
             ORDER BY p.sale_price ASC NULLS LAST
@@ -98,18 +97,17 @@ class ProductRepository:
             SELECT
                 p.id,
                 p.name,
-                b.name AS brand_name,
+                p.brand AS brand_name,
                 c.name AS category_name,
                 p.sale_price,
                 p.original_price,
-                p.rating,
-                p.review_count,
-                p.stock,
-                p.gift_promotion,
-                p.description,
-                p.specifications
+                p.rating_vote AS rating,
+                0 AS review_count,
+                0 AS stock,
+                p.promotion AS gift_promotion,
+                p.warranty_policy AS description,
+                p.spec_product AS specifications
             FROM products p
-            LEFT JOIN brands b ON p.brand_id = b.id
             LEFT JOIN categories c ON p.category_id = c.id
             WHERE {' OR '.join(clauses)}
             LIMIT {int(limit)}

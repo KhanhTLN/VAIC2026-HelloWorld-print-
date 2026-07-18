@@ -127,17 +127,17 @@ def init_vector_db():
         cursor = conn.cursor()
         query = """
             SELECT 
-                p.product_id, 
+                p.id, 
                 p.name, 
                 p.brand, 
-                c.category_name, 
+                c.name AS category_name, 
                 p.sale_price, 
                 p.original_price,
                 p.promotion, 
-                p.outstanding,
+                p.warranty_policy,
                 p.spec_product
             FROM products p
-            LEFT JOIN categories c ON p.category_id = c.category_id
+            LEFT JOIN categories c ON p.category_id = c.id
         """
         cursor.execute(query)
         rows = cursor.fetchall()

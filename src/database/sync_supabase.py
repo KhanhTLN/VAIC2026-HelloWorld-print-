@@ -1,8 +1,12 @@
 import os
 import sys
 import json
-import psycopg2
-from psycopg2.extras import RealDictCursor
+try:
+    import psycopg2
+    from psycopg2.extras import RealDictCursor
+except ModuleNotFoundError:  # pragma: no cover - optional runtime dependency
+    psycopg2 = None
+    RealDictCursor = None
 
 # Cấu hình stdout hiển thị tốt Tiếng Việt
 if sys.platform.startswith('win'):
@@ -12,6 +16,8 @@ if sys.platform.startswith('win'):
 DB_URL = "postgresql://postgres.bdcsgjmmizlbrgnaztto:PhamTheQuyen2005%40@aws-0-ap-northeast-1.pooler.supabase.com:5432/postgres"
 
 def get_db_connection():
+    if psycopg2 is None:
+        raise ModuleNotFoundError("psycopg2 is required to connect to PostgreSQL")
     return psycopg2.connect(DB_URL)
 
 from decimal import Decimal
@@ -64,17 +70,17 @@ def sync_data():
         
         query = """
             SELECT 
-                p.product_id, 
+                p.id, 
                 p.name, 
                 p.brand, 
-                c.category_name, 
+                c.name AS category_name, 
                 p.sale_price, 
                 p.original_price,
                 p.promotion, 
-                p.outstanding,
+                p.warranty_policy,
                 p.spec_product
             FROM products p
-            LEFT JOIN categories c ON p.category_id = c.category_id
+            LEFT JOIN categories c ON p.category_id = c.id
         """
         
         print("📥 Đang tải dữ liệu sản phẩm...")
@@ -97,7 +103,7 @@ def sync_data():
                     specs_str = str(specs_data)
             
             formatted_price_str = format_price(price)
-            description = row['outstanding'] or ""
+            description = row['warranty_policy'] or ""
             normalized_cat = normalize_category(row['category_name'])
             
             # Tạo trường full_text làm giàu ngữ cảnh cho RAG
@@ -111,7 +117,7 @@ def sync_data():
             )
             
             cleaned_products.append({
-                "id": str(row['product_id']),
+                "id": str(row['id']),
                 "name": row['name'],
                 "brand": (row['brand'] or '').strip().upper(),
                 "category": normalized_cat,
