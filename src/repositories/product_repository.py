@@ -103,6 +103,7 @@ class ProductRepository:
         category = filters.get("category")
         if category:
             where_parts.append("c.category_name ILIKE %s")
+            where_parts.append("c.category_name ILIKE %s")
             params.append(f"%{category}%")
 
         brand = filters.get("brand")
