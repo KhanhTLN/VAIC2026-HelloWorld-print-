@@ -1,6 +1,5 @@
 import requests
 import json
-import os
 import re
 from src.database.vector_store import query_policy
 from src.database.sync_supabase import get_db_connection, safe_int, format_price, normalize_category
@@ -138,6 +137,52 @@ def analyze_intent_fast(user_message):
     return intent
 
 
+def parse_search_features(user_message):
+    text = user_message.lower()
+    return {
+        "camera": any(kw in text for kw in ["camera", "chụp ảnh", "ảnh đẹp", "anh dep", "cam"]),
+        "gaming": any(kw in text for kw in ["chơi game", "gaming", "game", "fps", "mở game", "pubg", "lien quan"]),
+        "battery": any(kw in text for kw in ["pin trâu", "pin dai", "pin lớn", "5000", "6000", "dung lượng pin"]),
+        "student": any(kw in text for kw in ["sinh viên", "hoc sinh", "học sinh", "sinh vien", "van phong", "văn phòng", "học tập", "hoc tap"]),
+        "camera_only": any(kw in text for kw in ["camera đẹp", "chụp ảnh đẹp", "camera tốt"]),
+        "fast_charge": any(kw in text for kw in ["sạc nhanh", "fast charge", "45w", "60w", "120w"]),
+    }
+
+
+def build_search_filter_conditions(category, budget, user_message):
+    filters = []
+    if category:
+        sql_cat = category_sql_condition(category)
+        if sql_cat:
+            filters.append(sql_cat)
+
+    feature_map = parse_search_features(user_message)
+    if feature_map.get("battery"):
+        filters.append("(p.spec_product::text ILIKE '%pin%' OR p.outstanding ILIKE '%pin%' OR p.name ILIKE '%pin%')")
+    if feature_map.get("camera"):
+        filters.append("(p.spec_product::text ILIKE '%camera%' OR p.outstanding ILIKE '%camera%' OR p.name ILIKE '%camera%')")
+    if feature_map.get("gaming"):
+        filters.append("(p.spec_product::text ILIKE '%gaming%' OR p.name ILIKE '%gaming%' OR p.outstanding ILIKE '%gaming%')")
+    if feature_map.get("fast_charge"):
+        filters.append("(p.spec_product::text ILIKE '%sạc nhanh%' OR p.spec_product::text ILIKE '%fast charge%' OR p.outstanding ILIKE '%sạc nhanh%')")
+
+    if budget:
+        filters.append("p.sale_price <= %s")
+
+    return filters
+
+
+def build_search_order_clause(category, user_message):
+    feature_map = parse_search_features(user_message)
+    if feature_map.get("gaming"):
+        return "ORDER BY p.sale_price DESC"
+    if feature_map.get("camera"):
+        return "ORDER BY p.sale_price DESC"
+    if feature_map.get("battery"):
+        return "ORDER BY p.sale_price DESC"
+    return "ORDER BY p.sale_price DESC"
+
+
 def build_product_context(rows):
     context_list = []
     for row in rows:
@@ -182,7 +227,17 @@ def query_exact_product(user_message, limit=5):
     try:
         conn = get_db_connection()
         cur = conn.cursor()
-        tokens = [tk.strip() for tk in re.findall(r"[\wÀ-ỹ\-]+", user_message) if len(tk.strip()) >= 2]
+        raw_tokens = [tk.strip() for tk in re.findall(r"[\wÀ-ỹ\-]+", user_message) if len(tk.strip()) >= 2]
+        if not raw_tokens:
+            return []
+
+        stop_words = {
+            'tôi', 'toi', 'muốn', 'muon', 'mua', 'cho', 'co', 'có', 'không', 'khong',
+            'tại', 'tai', 'ở', 'o', 'nào', 'nao', 'và', 'va', 'với', 'voi', 'về', 've',
+            'cần', 'can', 'tìm', 'tim', 'giúp', 'giup', 'giá', 'gia', 'dưới', 'duoi',
+            'khoảng', 'khoang', 'tầm', 'tam', 'sản', 'san', 'phẩm', 'pham'
+        }
+        tokens = [tk for tk in raw_tokens if tk.lower() not in stop_words and not tk.isdigit()]
         if not tokens:
             return []
 
@@ -193,6 +248,7 @@ def query_exact_product(user_message, limit=5):
             conditions.append("(p.name ILIKE %s OR p.product_code ILIKE %s OR p.outstanding ILIKE %s)")
             params.extend([like_token, like_token, like_token])
 
+        exact_phrase = user_message.strip()
         query = f"""
             SELECT
                 p.product_id,
@@ -203,13 +259,20 @@ def query_exact_product(user_message, limit=5):
                 p.original_price,
                 p.promotion,
                 p.outstanding,
-                p.spec_product
+                p.spec_product,
+                (CASE
+                    WHEN p.product_code ILIKE %s THEN 100
+                    WHEN p.name ILIKE %s THEN 80
+                    WHEN p.outstanding ILIKE %s THEN 40
+                    ELSE 0
+                END) AS phrase_score
             FROM products p
             LEFT JOIN categories c ON p.category_id = c.category_id
-            WHERE {' OR '.join(conditions)}
-            ORDER BY p.sale_price DESC
+            WHERE {' AND '.join(conditions)}
+            ORDER BY phrase_score DESC, p.sale_price DESC
             LIMIT %s
         """
+        params.extend([f"%{exact_phrase}%", f"%{exact_phrase}%", f"%{exact_phrase}%"])
         params.append(limit)
         cur.execute(query, params)
         rows = cur.fetchall()
@@ -271,26 +334,19 @@ def db_search_products(category, budget, user_message, limit=3):
         conn = get_db_connection()
         cur = conn.cursor()
 
-        keywords = []
-        cleaned = re.sub(r'[^\w\s\-]', ' ', user_message.lower())
-        words = cleaned.split()
+        cleaned = re.sub(r'[^\w\s\-À-ỹ]', ' ', user_message.lower())
+        words = [w for w in cleaned.split() if len(w) >= 2]
         stop_words = {
-            'tôi', 'muốn', 'mua', 'tư', 'vấn', 'cho', 'giá', 'dưới', 'khoảng', 'tầm',
-            'có', 'không', 'nào', 'ở', 'tại', 'tìm', 'giúp', 'cần', 'dòng', 'sản', 'phẩm',
-            'loại', 'hiệu', 'máy', 'điện', 'thoại', 'lạnh', 'tủ', 'đồ', 'tai', 'nghe', 'laptop'
+            'tôi', 'toi', 'muốn', 'muon', 'mua', 'cho', 'co', 'có', 'không', 'khong',
+            'tại', 'tai', 'ở', 'o', 'nào', 'nao', 'và', 'va', 'với', 'voi', 'về', 've',
+            'cần', 'can', 'tìm', 'tim', 'giúp', 'giup', 'giá', 'gia', 'dưới', 'duoi',
+            'khoảng', 'khoang', 'tầm', 'tam', 'sản', 'san', 'phẩm', 'pham', 'ngân', 'ngan',
+            'sách', 'sach', 'trên', 'tren', 'dưới', 'duoi', 'và', 'va'
         }
-        for w in words:
-            if w in stop_words:
-                continue
-            if budget:
-                if str(budget) in w:
-                    continue
-                if w.isdigit() and int(w) == budget // 1000000:
-                    continue
-            if w.isdigit() and len(w) >= 3:
-                continue
-            if len(w) >= 2 or w.isdigit() or '-' in w:
-                keywords.append(w)
+        keywords = [w for w in words if w not in stop_words and not (w.isdigit() and len(w) >= 3)]
+
+        filters = build_search_filter_conditions(category, budget, user_message)
+        filter_sql = ' AND '.join(filters) if filters else '1=1'
 
         relevance_score_expr = '0'
         match_cond = '1=1'
@@ -314,22 +370,19 @@ def db_search_products(category, budget, user_message, limit=3):
                 else:
                     score_parts.append(f"""
                         (CASE
-                            WHEN p.product_id = '{escaped_kw}' OR p.product_code = '{escaped_kw}' THEN 20
-                            WHEN p.name ILIKE '%{escaped_kw}%' THEN 2
-                            WHEN p.outstanding ILIKE '%{escaped_kw}%' THEN 1
+                            WHEN p.name ILIKE '%{escaped_kw}%' THEN 4
+                            WHEN p.outstanding ILIKE '%{escaped_kw}%' THEN 2
                             WHEN p.spec_product::text ILIKE '%{escaped_kw}%' THEN 1
                             ELSE 0
                         END)
                     """)
-                match_parts.append(f"(p.product_id = '{escaped_kw}' OR p.product_code = '{escaped_kw}' OR p.name ILIKE '%{escaped_kw}%' OR p.outstanding ILIKE '%{escaped_kw}%' OR p.spec_product::text ILIKE '%{escaped_kw}%')")
+                match_parts.append(f"(p.name ILIKE '%{escaped_kw}%' OR p.product_code ILIKE '%{escaped_kw}%' OR p.outstanding ILIKE '%{escaped_kw}%' OR p.spec_product::text ILIKE '%{escaped_kw}%')")
 
             relevance_score_expr = ' + '.join(score_parts)
             match_cond = '(' + ' OR '.join(match_parts) + ')'
 
         params = []
-        budget_cond = ''
         if budget:
-            budget_cond = ' AND p.sale_price <= %s'
             params.append(budget)
 
         query = f"""
@@ -346,7 +399,7 @@ def db_search_products(category, budget, user_message, limit=3):
                 ({relevance_score_expr}) as relevance
             FROM products p
             LEFT JOIN categories c ON p.category_id = c.category_id
-            WHERE {sql_cond} AND {match_cond}{budget_cond}
+            WHERE {filter_sql} AND {match_cond}
             ORDER BY relevance DESC, p.sale_price DESC
             LIMIT %s
         """
@@ -370,7 +423,7 @@ def db_search_products(category, budget, user_message, limit=3):
                     ({relevance_score_expr}) as relevance
                 FROM products p
                 LEFT JOIN categories c ON p.category_id = c.category_id
-                WHERE {sql_cond} AND {match_cond}
+                WHERE {sql_cond} AND {match_cond}{feature_filter}
                 ORDER BY relevance DESC, p.sale_price ASC
                 LIMIT %s
             """
@@ -398,7 +451,7 @@ def db_search_products(category, budget, user_message, limit=3):
                     0 as relevance
                 FROM products p
                 LEFT JOIN categories c ON p.category_id = c.category_id
-                WHERE {sql_cond}{budget_cond}
+                WHERE {sql_cond}{feature_filter}{budget_cond}
                 ORDER BY p.sale_price DESC
                 LIMIT %s
             """
@@ -531,12 +584,10 @@ def generate_advisor_response_stream(user_message, history=None):
 
     # TH1: Tìm sản phẩm cụ thể trước khi vào pipeline mơ hồ
     exact_rows = query_exact_product(user_message, limit=3)
-    exact_match = False
     if exact_rows:
         context = build_product_context(exact_rows)
         is_upsell = False
         top_relevance = 5
-        exact_match = True
         if exact_rows[0][3]:
             normalized_cat = normalize_category(exact_rows[0][3])
             if normalized_cat:
@@ -547,14 +598,10 @@ def generate_advisor_response_stream(user_message, history=None):
         context, is_upsell, top_relevance = db_search_products(category, budget, user_message)
 
     # Xây dựng danh sách tin nhắn hội thoại cho API chat
-    conversation_messages = []
     if history:
         conversation_messages = history
     else:
         conversation_messages = [{"role": "user", "content": user_message}]
-
-    # Không cần dựng history_context thủ công nữa vì đã dùng API Chat
-    history_context = ""
 
     # Đọc nhanh catalog từ Database để kiểm tra thực tế trong kho có sản phẩm thuộc ngành hàng này hay không
     has_category_products = category and category_has_products(category)
