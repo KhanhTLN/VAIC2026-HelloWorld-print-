@@ -17,7 +17,7 @@ class ProductRepository:
 
         category = filters.get("category")
         if category:
-            where_parts.append("c.name ILIKE %s")
+            where_parts.append("c.category_name ILIKE %s")
             params.append(f"%{category}%")
 
         brand = filters.get("brand")
@@ -56,7 +56,7 @@ class ProductRepository:
                 p.id,
                 p.name,
                 p.brand AS brand_name,
-                c.name AS category_name,
+                c.category_name AS category_name,
                 p.sale_price,
                 p.original_price,
                 p.rating_vote AS rating,
@@ -66,7 +66,7 @@ class ProductRepository:
                 p.warranty_policy AS description,
                 p.spec_product AS specifications
             FROM products p
-            LEFT JOIN categories c ON p.category_id = c.id
+            LEFT JOIN categories c ON p.category_id = c.category_id
             WHERE {' AND '.join(where_parts)}
             ORDER BY p.sale_price ASC NULLS LAST
             LIMIT {int(limit)}
@@ -98,7 +98,7 @@ class ProductRepository:
                 p.id,
                 p.name,
                 p.brand AS brand_name,
-                c.name AS category_name,
+                c.category_name AS category_name,
                 p.sale_price,
                 p.original_price,
                 p.rating_vote AS rating,
@@ -108,7 +108,7 @@ class ProductRepository:
                 p.warranty_policy AS description,
                 p.spec_product AS specifications
             FROM products p
-            LEFT JOIN categories c ON p.category_id = c.id
+            LEFT JOIN categories c ON p.category_id = c.category_id
             WHERE {' OR '.join(clauses)}
             LIMIT {int(limit)}
         """
