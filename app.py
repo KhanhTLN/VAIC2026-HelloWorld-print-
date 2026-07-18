@@ -1,19 +1,15 @@
 import streamlit as st
-import sys
+import requests
 import os
 
-# Thêm đường dẫn thư mục gốc vào hệ thống để import được file agent_logic.py
-sys.path.append(os.path.abspath(os.path.dirname(__file__)))
-import importlib
-import src.agents.agent_logic as agent_logic
-importlib.reload(agent_logic)
-from src.agents.agent_logic import generate_advisor_response_stream
+# Cấu hình URL backend qua biến môi trường (mặc định chạy local ở port 8001)
+BACKEND_URL = os.getenv("BACKEND_URL", "http://127.0.0.1:8001")
 
 # 1. Cấu hình tiêu đề trang web
 st.set_page_config(page_title="Trợ lý AI Điện Máy Xanh", page_icon="⚡", layout="centered")
 
 st.title("⚡ Trợ lý AI Tư vấn Điện Máy Xanh")
-st.caption("Hệ thống trợ lý AI chạy Local - Thử nghiệm mô hình mua sắm thông minh VIC 2026")
+st.caption("Giao diện Frontend Trợ lý AI - Thử nghiệm mua sắm thông minh VIC 2026")
 st.write("---")
 
 # 2. Khởi tạo lịch sử chat lưu trong bộ nhớ trình duyệt
@@ -27,6 +23,32 @@ for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
 
+# Hàm gọi API Backend để lấy stream dữ liệu
+def get_backend_stream(message, history):
+    try:
+        # Chuẩn bị payload gửi lên backend
+        payload = {
+            "message": message,
+            "history": history[:-1] # Bỏ tin nhắn cuối vừa mới nhập vì sẽ truyền ở trường message
+        }
+        
+        # Gửi request POST dạng streaming (tăng timeout lên 120s phòng khi Ollama tải model chậm trên CPU)
+        response = requests.post(
+            f"{BACKEND_URL}/api/chat",
+            json=payload,
+            stream=True,
+            timeout=120
+        )
+        
+        if response.status_code == 200:
+            for chunk in response.iter_content(chunk_size=None, decode_unicode=True):
+                if chunk:
+                    yield chunk
+        else:
+            yield f"⚠️ Lỗi kết nối đến Backend: Mã lỗi {response.status_code}."
+    except Exception as e:
+        yield f"⚠️ Không thể kết nối tới server Backend ({BACKEND_URL}). Vui lòng đảm bảo backend đang chạy! (Chi tiết lỗi: {str(e)})"
+
 # 4. Tiếp nhận câu hỏi mới từ người dùng nhập vào ô chat
 if user_input := st.chat_input("Nhập nhu cầu của anh/chị tại đây..."):
     
@@ -35,9 +57,9 @@ if user_input := st.chat_input("Nhập nhu cầu của anh/chị tại đây..."
         st.markdown(user_input)
     st.session_state.messages.append({"role": "user", "content": user_input})
     
-    # Kích hoạt bộ não AI chạy local xử lý câu trả lời
+    # Gọi API Backend để nhận stream chữ phản hồi
     with st.chat_message("assistant"):
-        ai_response = st.write_stream(generate_advisor_response_stream(user_input, history=st.session_state.messages))
+        ai_response = st.write_stream(get_backend_stream(user_input, st.session_state.messages))
             
     # Lưu câu trả lời của AI vào lịch sử chat
     st.session_state.messages.append({"role": "assistant", "content": ai_response})
