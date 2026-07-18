@@ -1,0 +1,7 @@
+pandas==2.2.2
+chromadb==0.5.3
+fastapi==0.111.0
+uvicorn==0.30.1
+pydantic==2.7.4
+langchain-community==0.2.5
+langchain-text-splitters==0.2.1
