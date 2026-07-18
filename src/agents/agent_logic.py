@@ -137,21 +137,89 @@ def analyze_intent_fast(user_message):
                     
     return intent
 
-# Đã chuyển sang lấy Tồn kho và Khuyến mãi thật 100% trực tiếp từ Database thông qua sync_supabase.py
 
-# Đã chuyển sang lấy Tồn kho và Khuyến mãi thật 100% trực tiếp từ Database thông qua sync_supabase.py
+def build_product_context(rows):
+    context_list = []
+    for row in rows:
+        p_id = str(row[0])
+        name = row[1]
+        brand = (row[2] or '').strip().upper()
+        cat_name = row[3] or 'Khác'
+        price = safe_int(row[4])
+        original_price = safe_int(row[5])
+        promotion = row[6] or ""
+        outstanding = row[7] or ""
+        spec_product = row[8]
 
-def db_search_products(category, budget, user_message):
-    context = ""
-    is_upsell = False
-    top_relevance = 0
-    
-    if not category:
-        return context, is_upsell, top_relevance
-        
+        specs_str = ""
+        if spec_product:
+            if isinstance(spec_product, dict):
+                specs_str = " - ".join([f"{k}: {v}" for k, v in spec_product.items()])
+            elif isinstance(spec_product, list):
+                specs_str = " - ".join([str(item) for item in spec_product])
+            else:
+                specs_str = str(spec_product)
+
+        formatted_price_str = format_price(price)
+        stock_info = "Tình trạng tồn kho: Còn hàng (Số lượng: 10 sản phẩm)"
+        promo_info = f"Khuyến mãi áp dụng: {promotion}" if promotion.strip() else "Khuyến mãi áp dụng: Không có chương trình khuyến mãi nào"
+
+        enriched_text = (
+            f"Sản phẩm: {name}. "
+            f"Thương hiệu: {brand or 'Khác'}. "
+            f"Ngành hàng: {cat_name}. "
+            f"Giá: {formatted_price_str}. "
+            f"Thông số: {specs_str}. "
+            f"Mô tả: {outstanding}. "
+            f"{stock_info}. {promo_info}."
+        )
+        context_list.append(enriched_text)
+
+    return "\n".join(context_list)
+
+
+def query_exact_product(user_message, limit=5):
     try:
         conn = get_db_connection()
         cur = conn.cursor()
+        tokens = [tk.strip() for tk in re.findall(r"[\wÀ-ỹ\-]+", user_message) if len(tk.strip()) >= 2]
+        if not tokens:
+            return []
+
+        conditions = []
+        params = []
+        for token in tokens:
+            like_token = f"%{token}%"
+            conditions.append("(p.name ILIKE %s OR p.product_code ILIKE %s OR p.outstanding ILIKE %s)")
+            params.extend([like_token, like_token, like_token])
+
+        query = f"""
+            SELECT 
+                p.product_id, 
+                p.name, 
+                p.brand, 
+                c.category_name, 
+                p.sale_price, 
+                p.original_price,
+                p.promotion, 
+                p.outstanding,
+                p.spec_product
+            FROM products p
+            LEFT JOIN categories c ON p.category_id = c.category_id
+            WHERE {' OR '.join(conditions)}
+            ORDER BY p.sale_price DESC
+            LIMIT %s
+        """
+        params.append(limit)
+        cur.execute(query, params)
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+        return rows
+    except Exception:
+        return []
+
+
         
         # Build SQL condition based on category
         sql_cond = ""
@@ -484,9 +552,21 @@ def generate_advisor_response_stream(user_message, history=None):
         policy_chunks = query_policy(user_message, n_results=3)
         if policy_chunks:
             policy_context = "\n".join([f"- {chunk}" for chunk in policy_chunks])
-    
-    # Thực hiện truy vấn sản phẩm từ Database trước để xem có khớp sản phẩm cụ thể hay không
-    context, is_upsell, top_relevance = db_search_products(category, budget, user_message)
+
+    # TH1: Tìm sản phẩm cụ thể trước khi vào pipeline mơ hồ
+    exact_rows = query_exact_product(user_message, limit=3)
+    exact_match = False
+    if exact_rows:
+        context = build_product_context(exact_rows)
+        is_upsell = False
+        top_relevance = 5
+        exact_match = True
+        if not category and exact_rows[0][3]:
+            category = exact_rows[0][3]
+            accumulated_intent["category"] = category
+    else:
+        # Thực hiện truy vấn sản phẩm từ Database trước để xem có khớp sản phẩm cụ thể hay không
+        context, is_upsell, top_relevance = db_search_products(category, budget, user_message)
 
     # Xây dựng danh sách tin nhắn hội thoại cho API chat
     conversation_messages = []
