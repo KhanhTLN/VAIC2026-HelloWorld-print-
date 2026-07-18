@@ -3,7 +3,7 @@ import json
 import os
 import re
 from src.database.vector_store import query_policy
-from src.database.sync_supabase import get_db_connection, safe_int, format_price
+from src.database.sync_supabase import get_db_connection, safe_int, format_price, normalize_category
 
 OLLAMA_URL = "http://localhost:11434/api/chat"
 MODEL_NAME = "qwen2.5:3b" # Thay bằng qwen2.5:1.5b hoặc bản bạn đã tải thành công
@@ -194,14 +194,14 @@ def query_exact_product(user_message, limit=5):
             params.extend([like_token, like_token, like_token])
 
         query = f"""
-            SELECT 
-                p.product_id, 
-                p.name, 
-                p.brand, 
-                c.category_name, 
-                p.sale_price, 
+            SELECT
+                p.product_id,
+                p.name,
+                p.brand,
+                c.category_name,
+                p.sale_price,
                 p.original_price,
-                p.promotion, 
+                p.promotion,
                 p.outstanding,
                 p.spec_product
             FROM products p
@@ -220,31 +220,38 @@ def query_exact_product(user_message, limit=5):
         return []
 
 
-        
-        # Build SQL condition based on category
-        sql_cond = ""
-        if category == 'may-lanh':
-            sql_cond = "(c.category_name = 'Máy lạnh' OR p.name ILIKE '%%máy lạnh%%' OR p.name ILIKE '%%điều hòa%%')"
-        elif category == 'dien-thoai':
-            sql_cond = "(c.category_name = 'Điện thoại' OR p.name ILIKE '%%điện thoại%%' OR p.name ILIKE '%%iphone%%')"
-        elif category == 'tu-lanh':
-            sql_cond = "(c.category_name = 'Tủ lạnh' OR p.name ILIKE '%%tủ lạnh%%' OR p.name ILIKE '%%tủ mát%%' OR p.name ILIKE '%%tủ đông%%')"
-        elif category == 'laptop':
-            sql_cond = "(c.category_name = 'Laptop' OR p.name ILIKE '%%laptop%%' OR p.name ILIKE '%%máy tính%%')"
-        elif category == 'tai-nghe':
-            sql_cond = "(c.category_name = 'Loa, Tai nghe' OR p.name ILIKE '%%tai nghe%%' OR p.name ILIKE '%%airpods%%')"
-        
-        if not sql_cond:
-            cur.close()
-            conn.close()
-            return context, is_upsell, top_relevance
-            
-        # 1. Trích xuất các từ khóa tìm kiếm có nghĩa từ câu hỏi khách hàng (giữ dấu gạch ngang để khớp model code)
+def category_sql_condition(category):
+    if category == 'may-lanh':
+        return "(c.category_name = 'Máy lạnh' OR p.name ILIKE '%máy lạnh%' OR p.name ILIKE '%điều hòa%')"
+    elif category == 'dien-thoai':
+        return "(c.category_name = 'Điện thoại' OR p.name ILIKE '%điện thoại%' OR p.name ILIKE '%iphone%')"
+    elif category == 'tu-lanh':
+        return "(c.category_name = 'Tủ lạnh' OR p.name ILIKE '%tủ lạnh%' OR p.name ILIKE '%tủ mát%' OR p.name ILIKE '%tủ đông%')"
+    elif category == 'laptop':
+        return "(c.category_name = 'Laptop' OR p.name ILIKE '%laptop%' OR p.name ILIKE '%máy tính%')"
+    elif category == 'tai-nghe':
+        return "(c.category_name = 'Loa, Tai nghe' OR p.name ILIKE '%tai nghe%' OR p.name ILIKE '%airpods%')"
+    return ""
+
+
+def db_search_products(category, budget, user_message, limit=3):
+    context = ""
+    is_upsell = False
+    top_relevance = 0
+
+    sql_cond = category_sql_condition(category)
+    if not sql_cond:
+        return context, is_upsell, top_relevance
+
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+
         keywords = []
         cleaned = re.sub(r'[^\w\s\-]', ' ', user_message.lower())
         words = cleaned.split()
         stop_words = {
-            'tôi', 'muốn', 'mua', 'tư', 'vấn', 'cho', 'giá', 'dưới', 'khoảng', 'tầm', 
+            'tôi', 'muốn', 'mua', 'tư', 'vấn', 'cho', 'giá', 'dưới', 'khoảng', 'tầm',
             'có', 'không', 'nào', 'ở', 'tại', 'tìm', 'giúp', 'cần', 'dòng', 'sản', 'phẩm',
             'loại', 'hiệu', 'máy', 'điện', 'thoại', 'lạnh', 'tủ', 'đồ', 'tai', 'nghe', 'laptop'
         }
@@ -258,62 +265,56 @@ def query_exact_product(user_message, limit=5):
             if w.isdigit() and len(w) >= 3:
                 continue
             if len(w) >= 2 or w.isdigit() or '-' in w:
-                    keywords.append(w)
+                keywords.append(w)
 
-        # Xây dựng công thức tính độ liên quan và điều kiện lọc
-        relevance_score_expr = "0"
-        match_cond = "1=1"
-        
+        relevance_score_expr = '0'
+        match_cond = '1=1'
         if keywords:
             score_parts = []
             match_parts = []
             for kw in keywords:
                 escaped_kw = kw.replace("'", "''")
-                
-                # Kiểm tra xem từ khóa này có phải là ứng viên của Model Code không
                 is_model_code = '-' in kw or (any(c.isdigit() for c in kw) and any(c.isalpha() for c in kw) and len(kw) >= 5)
-                
+
                 if is_model_code:
                     score_parts.append(f"""
-                        (CASE 
+                        (CASE
                             WHEN p.product_id = '{escaped_kw}' OR p.product_code = '{escaped_kw}' THEN 50
-                            WHEN p.name ILIKE '%%{escaped_kw}%%' THEN 30
-                            WHEN p.outstanding ILIKE '%%{escaped_kw}%%' THEN 10
-                            WHEN p.spec_product::text ILIKE '%%{escaped_kw}%%' THEN 5
-                            ELSE 0 
+                            WHEN p.name ILIKE '%{escaped_kw}%' THEN 30
+                            WHEN p.outstanding ILIKE '%{escaped_kw}%' THEN 10
+                            WHEN p.spec_product::text ILIKE '%{escaped_kw}%' THEN 5
+                            ELSE 0
                         END)
                     """)
                 else:
                     score_parts.append(f"""
-                        (CASE 
+                        (CASE
                             WHEN p.product_id = '{escaped_kw}' OR p.product_code = '{escaped_kw}' THEN 20
-                            WHEN p.name ILIKE '%%{escaped_kw}%%' THEN 2
-                            WHEN p.outstanding ILIKE '%%{escaped_kw}%%' THEN 1
-                            ELSE 0 
+                            WHEN p.name ILIKE '%{escaped_kw}%' THEN 2
+                            WHEN p.outstanding ILIKE '%{escaped_kw}%' THEN 1
+                            ELSE 0
                         END)
                     """)
-                
-                match_parts.append(f"(p.product_id = '{escaped_kw}' OR p.product_code = '{escaped_kw}' OR p.name ILIKE '%%{escaped_kw}%%' OR p.outstanding ILIKE '%%{escaped_kw}%%' OR p.spec_product::text ILIKE '%%{escaped_kw}%%')")
-            
-            relevance_score_expr = " + ".join(score_parts)
-            match_cond = "(" + " OR ".join(match_parts) + ")"
+                match_parts.append(f"(p.product_id = '{escaped_kw}' OR p.product_code = '{escaped_kw}' OR p.name ILIKE '%{escaped_kw}%' OR p.outstanding ILIKE '%{escaped_kw}%' OR p.spec_product::text ILIKE '%{escaped_kw}%')")
 
-        # TIER 1: Truy vấn theo danh mục, từ khóa và ngân sách
+            relevance_score_expr = ' + '.join(score_parts)
+            match_cond = '(' + ' OR '.join(match_parts) + ')'
+
         params = []
-        budget_cond = ""
+        budget_cond = ''
         if budget:
-            budget_cond = " AND p.sale_price <= %s"
+            budget_cond = ' AND p.sale_price <= %s'
             params.append(budget)
-            
+
         query = f"""
-            SELECT 
-                p.product_id, 
-                p.name, 
-                p.brand, 
-                c.category_name, 
-                p.sale_price, 
+            SELECT
+                p.product_id,
+                p.name,
+                p.brand,
+                c.category_name,
+                p.sale_price,
                 p.original_price,
-                p.promotion, 
+                p.promotion,
                 p.outstanding,
                 p.spec_product,
                 ({relevance_score_expr}) as relevance
@@ -321,23 +322,23 @@ def query_exact_product(user_message, limit=5):
             LEFT JOIN categories c ON p.category_id = c.category_id
             WHERE {sql_cond} AND {match_cond}{budget_cond}
             ORDER BY relevance DESC, p.sale_price DESC
+            LIMIT %s
         """
-        print(f"\n[SQL TIER 1 - EXACT SEARCH]:\n{cur.mogrify(query, params).decode('utf-8')}\n")
+        params.append(limit)
         cur.execute(query, params)
         rows = cur.fetchall()
-        
-        # TIER 2: Nếu có ngân sách nhưng không tìm thấy kết quả khớp từ khóa -> Tìm bán hàng cận biên khớp từ khóa
+
         if budget and not rows:
             is_upsell = True
             query_upsell = f"""
-                SELECT 
-                    p.product_id, 
-                    p.name, 
-                    p.brand, 
-                    c.category_name, 
-                    p.sale_price, 
+                SELECT
+                    p.product_id,
+                    p.name,
+                    p.brand,
+                    c.category_name,
+                    p.sale_price,
                     p.original_price,
-                    p.promotion, 
+                    p.promotion,
                     p.outstanding,
                     p.spec_product,
                     ({relevance_score_expr}) as relevance
@@ -345,28 +346,27 @@ def query_exact_product(user_message, limit=5):
                 LEFT JOIN categories c ON p.category_id = c.category_id
                 WHERE {sql_cond} AND {match_cond}
                 ORDER BY relevance DESC, p.sale_price ASC
-                LIMIT 2
+                LIMIT %s
             """
-            print(f"\n[SQL TIER 2 - UPSELL SEARCH]:\n{cur.mogrify(query_upsell).decode('utf-8')}\n")
-            cur.execute(query_upsell)
+            cur.execute(query_upsell, (limit,))
             rows = cur.fetchall()
-            
-        # TIER 3: Nếu không tìm thấy kết quả theo từ khóa -> Bỏ điều kiện từ khóa, chỉ lọc theo danh mục & ngân sách
+
         if not rows:
             params = []
-            budget_cond = ""
+            budget_cond = ''
             if budget:
-                budget_cond = " AND p.sale_price <= %s"
+                budget_cond = ' AND p.sale_price <= %s'
                 params.append(budget)
+
             query_fallback = f"""
-                SELECT 
-                    p.product_id, 
-                    p.name, 
-                    p.brand, 
-                    c.category_name, 
-                    p.sale_price, 
+                SELECT
+                    p.product_id,
+                    p.name,
+                    p.brand,
+                    c.category_name,
+                    p.sale_price,
                     p.original_price,
-                    p.promotion, 
+                    p.promotion,
                     p.outstanding,
                     p.spec_product,
                     0 as relevance
@@ -374,23 +374,23 @@ def query_exact_product(user_message, limit=5):
                 LEFT JOIN categories c ON p.category_id = c.category_id
                 WHERE {sql_cond}{budget_cond}
                 ORDER BY p.sale_price DESC
+                LIMIT %s
             """
-            print(f"\n[SQL TIER 3 - FALLBACK CATEGORY BUDGET]:\n{cur.mogrify(query_fallback, params).decode('utf-8')}\n")
+            params.append(limit)
             cur.execute(query_fallback, params)
             rows = cur.fetchall()
-            
-        # TIER 4: Nếu bỏ từ khóa và lọc theo danh mục & ngân sách vẫn trống -> Bán hàng cận biên danh mục
+
         if budget and not rows:
             is_upsell = True
             query_final_fallback = f"""
-                SELECT 
-                    p.product_id, 
-                    p.name, 
-                    p.brand, 
-                    c.category_name, 
-                    p.sale_price, 
+                SELECT
+                    p.product_id,
+                    p.name,
+                    p.brand,
+                    c.category_name,
+                    p.sale_price,
                     p.original_price,
-                    p.promotion, 
+                    p.promotion,
                     p.outstanding,
                     p.spec_product,
                     0 as relevance
@@ -398,72 +398,22 @@ def query_exact_product(user_message, limit=5):
                 LEFT JOIN categories c ON p.category_id = c.category_id
                 WHERE {sql_cond}
                 ORDER BY p.sale_price ASC
-                LIMIT 2
+                LIMIT %s
             """
-            print(f"\n[SQL TIER 4 - FINAL FALLBACK UPSELL]:\n{cur.mogrify(query_final_fallback).decode('utf-8')}\n")
-            cur.execute(query_final_fallback)
+            cur.execute(query_final_fallback, (limit,))
             rows = cur.fetchall()
-        else:
-            rows = rows[:3]
-            
+
+        rows = rows[:limit]
         if rows:
             top_relevance = rows[0][9]
-            
-        # 3. Xây dựng context
-        context_list = []
-        for row in rows:
-            p_id = str(row[0])
-            name = row[1]
-            brand = (row[2] or '').strip().upper()
-            cat_name = row[3] or 'Khác'
-            price = safe_int(row[4])
-            original_price = safe_int(row[5])
-            promotion = row[6] or ""
-            outstanding = row[7] or ""
-            spec_product = row[8]
-            
-            # Format specs to string
-            specs_str = ""
-            if spec_product:
-                if isinstance(spec_product, dict):
-                    specs_str = " - ".join([f"{k}: {v}" for k, v in spec_product.items()])
-                elif isinstance(spec_product, list):
-                    specs_str = " - ".join([str(item) for item in spec_product])
-                else:
-                    specs_str = str(spec_product)
-                    
-            formatted_price_str = format_price(price)
-            
-            # Tạo full_text
-            full_text = (
-                f"Sản phẩm: {name}. "
-                f"Thương hiệu: {brand or 'Khác'}. "
-                f"Ngành hàng: {cat_name}. "
-                f"Giá: {formatted_price_str}. "
-                f"Thông số: {specs_str}. "
-                f"Mô tả: {outstanding}"
-            )
-            
-            # Tình trạng tồn kho mặc định
-            stock_info = "Tình trạng tồn kho: Còn hàng (Số lượng: 10 sản phẩm)"
-            
-            # Khuyến mãi
-            if promotion and promotion.strip():
-                promo_info = f"Khuyến mãi áp dụng: {promotion}"
-            else:
-                promo_info = "Khuyến mãi áp dụng: Không có chương trình khuyến mãi nào"
-                
-            enriched_text = f"{full_text}. {stock_info}. {promo_info}."
-            context_list.append(enriched_text)
-            
-        context = "\n".join(context_list)
+            context = build_product_context(rows)
+
         cur.close()
         conn.close()
     except Exception as e:
         context = f"Lỗi đọc kho dữ liệu từ DB: {str(e)}"
-        
-    return context, is_upsell, top_relevance
 
+    return context, is_upsell, top_relevance
 def generate_advisor_response_stream(user_message, history=None):
     """Luồng điều phối chính dạng Generator (truyền tải dữ liệu luồng về UI)"""
     # 1. Tích lũy intent từ lịch sử chat để duy trì ngữ cảnh trạng thái (Stateful)
@@ -561,9 +511,11 @@ def generate_advisor_response_stream(user_message, history=None):
         is_upsell = False
         top_relevance = 5
         exact_match = True
-        if not category and exact_rows[0][3]:
-            category = exact_rows[0][3]
-            accumulated_intent["category"] = category
+        if exact_rows[0][3]:
+            normalized_cat = normalize_category(exact_rows[0][3])
+            if normalized_cat:
+                category = normalized_cat
+                accumulated_intent["category"] = normalized_cat
     else:
         # Thực hiện truy vấn sản phẩm từ Database trước để xem có khớp sản phẩm cụ thể hay không
         context, is_upsell, top_relevance = db_search_products(category, budget, user_message)

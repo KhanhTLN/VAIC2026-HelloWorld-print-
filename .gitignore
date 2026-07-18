@@ -2,4 +2,10 @@ node_modules
 # Keep environment variables out of version control
 .env
 
+# Local Python and editor artifacts
+.venv/
+.vscode/
+__pycache__/
+*.pyc
+
 /src/generated/prisma
