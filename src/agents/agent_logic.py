@@ -234,6 +234,30 @@ def category_sql_condition(category):
     return ""
 
 
+def category_has_products(category):
+    sql_cond = category_sql_condition(category)
+    if not sql_cond:
+        return False
+
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        query = f"""
+            SELECT 1
+            FROM products p
+            LEFT JOIN categories c ON p.category_id = c.category_id
+            WHERE {sql_cond}
+            LIMIT 1
+        """
+        cur.execute(query)
+        result = cur.fetchone()
+        cur.close()
+        conn.close()
+        return bool(result)
+    except Exception:
+        return False
+
+
 def db_search_products(category, budget, user_message, limit=3):
     context = ""
     is_upsell = False
@@ -259,8 +283,9 @@ def db_search_products(category, budget, user_message, limit=3):
             if w in stop_words:
                 continue
             if budget:
-                budget_str = str(budget)
-                if budget_str in w or (budget // 1000000) == w:
+                if str(budget) in w:
+                    continue
+                if w.isdigit() and int(w) == budget // 1000000:
                     continue
             if w.isdigit() and len(w) >= 3:
                 continue
@@ -292,6 +317,7 @@ def db_search_products(category, budget, user_message, limit=3):
                             WHEN p.product_id = '{escaped_kw}' OR p.product_code = '{escaped_kw}' THEN 20
                             WHEN p.name ILIKE '%{escaped_kw}%' THEN 2
                             WHEN p.outstanding ILIKE '%{escaped_kw}%' THEN 1
+                            WHEN p.spec_product::text ILIKE '%{escaped_kw}%' THEN 1
                             ELSE 0
                         END)
                     """)
@@ -405,7 +431,7 @@ def db_search_products(category, budget, user_message, limit=3):
 
         rows = rows[:limit]
         if rows:
-            top_relevance = rows[0][9]
+            top_relevance = rows[0][9] if rows and len(rows[0]) > 9 else 0
             context = build_product_context(rows)
 
         cur.close()
@@ -531,40 +557,7 @@ def generate_advisor_response_stream(user_message, history=None):
     history_context = ""
 
     # Đọc nhanh catalog từ Database để kiểm tra thực tế trong kho có sản phẩm thuộc ngành hàng này hay không
-    has_category_products = False
-    if category:
-        try:
-            conn = get_db_connection()
-            cur = conn.cursor()
-            
-            sql_cond = ""
-            if category == 'may-lanh':
-                sql_cond = "(c.category_name = 'Máy lạnh' OR p.name ILIKE '%%máy lạnh%%' OR p.name ILIKE '%%điều hòa%%')"
-            elif category == 'dien-thoai':
-                sql_cond = "(c.category_name = 'Điện thoại' OR p.name ILIKE '%%điện thoại%%' OR p.name ILIKE '%%iphone%%')"
-            elif category == 'tu-lanh':
-                sql_cond = "(c.category_name = 'Tủ lạnh' OR p.name ILIKE '%%tủ lạnh%%' OR p.name ILIKE '%%tủ mát%%' OR p.name ILIKE '%%tủ đông%%')"
-            elif category == 'laptop':
-                sql_cond = "(c.category_name = 'Laptop' OR p.name ILIKE '%%laptop%%' OR p.name ILIKE '%%máy tính%%')"
-            elif category == 'tai-nghe':
-                sql_cond = "(c.category_name = 'Loa, Tai nghe' OR p.name ILIKE '%%tai nghe%%' OR p.name ILIKE '%%airpods%%')"
-            
-            if sql_cond:
-                query = f"""
-                    SELECT COUNT(*) 
-                    FROM products p
-                    LEFT JOIN categories c ON p.category_id = c.category_id
-                    WHERE {sql_cond}
-                """
-                print(f"\n[SQL CHECK CATEGORY]:\n{query}\n")
-                cur.execute(query)
-                count = cur.fetchone()[0]
-                has_category_products = (count > 0)
-                
-            cur.close()
-            conn.close()
-        except Exception as e:
-            print(f"Lỗi kiểm tra danh mục từ DB: {e}")
+    has_category_products = category and category_has_products(category)
 
     # Nếu phát hiện ngành hàng đó trống trơn trong DB -> Báo hết hàng trực tiếp tại Python (Bypass LLM)
     if category and not has_category_products:
