@@ -146,10 +146,12 @@ def parse_search_features(user_message):
         "student": any(kw in text for kw in ["sinh viên", "hoc sinh", "học sinh", "sinh vien", "van phong", "văn phòng", "học tập", "hoc tap"]),
         "camera_only": any(kw in text for kw in ["camera đẹp", "chụp ảnh đẹp", "camera tốt"]),
         "fast_charge": any(kw in text for kw in ["sạc nhanh", "fast charge", "45w", "60w", "120w"]),
+        "iphone_style": any(kw in text for kw in ["giống iphone", "giong iphone", "kiểu iphone", "style iphone"]),
+        "vlog": any(kw in text for kw in ["vlog", "quay vlog", "video blogger", "content creator"]),
     }
 
 
-def build_search_filter_conditions(category, budget, user_message):
+def build_search_filter_conditions(category, budget, intent, user_message):
     filters = []
     if category:
         sql_cat = category_sql_condition(category)
@@ -157,6 +159,7 @@ def build_search_filter_conditions(category, budget, user_message):
             filters.append(sql_cat)
 
     feature_map = parse_search_features(user_message)
+
     if feature_map.get("battery"):
         filters.append("(p.spec_product::text ILIKE '%pin%' OR p.outstanding ILIKE '%pin%' OR p.name ILIKE '%pin%')")
     if feature_map.get("camera"):
@@ -165,19 +168,68 @@ def build_search_filter_conditions(category, budget, user_message):
         filters.append("(p.spec_product::text ILIKE '%gaming%' OR p.name ILIKE '%gaming%' OR p.outstanding ILIKE '%gaming%')")
     if feature_map.get("fast_charge"):
         filters.append("(p.spec_product::text ILIKE '%sạc nhanh%' OR p.spec_product::text ILIKE '%fast charge%' OR p.outstanding ILIKE '%sạc nhanh%')")
+    if feature_map.get("camera_only"):
+        filters.append("(p.spec_product::text ILIKE '%camera%' OR p.outstanding ILIKE '%camera%' OR p.name ILIKE '%camera%')")
+    if feature_map.get("student"):
+        filters.append("(p.outstanding ILIKE '%văn phòng%' OR p.outstanding ILIKE '%học tập%' OR p.name ILIKE '%văn phòng%' OR p.name ILIKE '%học tập%')")
+    if feature_map.get("iphone_style"):
+        filters.append("(p.name ILIKE '%iphone%' OR p.outstanding ILIKE '%iphone%' OR p.spec_product::text ILIKE '%iphone%')")
+    if feature_map.get("vlog"):
+        filters.append("(p.spec_product::text ILIKE '%vlog%' OR p.outstanding ILIKE '%vlog%' OR p.name ILIKE '%vlog%')")
+
+    if intent:
+        if intent.get("laptop_needs") == "van-phong":
+            filters.append("(p.spec_product::text ILIKE '%office%' OR p.spec_product::text ILIKE '%văn phòng%' OR p.spec_product::text ILIKE '%học tập%' OR p.spec_product::text ILIKE '%word%' OR p.spec_product::text ILIKE '%excel%')")
+        elif intent.get("laptop_needs") == "do-hoa-game":
+            filters.append("(p.spec_product::text ILIKE '%gaming%' OR p.spec_product::text ILIKE '%RTX%' OR p.spec_product::text ILIKE '%16GB%' OR p.spec_product::text ILIKE '%144Hz%' OR p.outstanding ILIKE '%gaming%')")
+        elif intent.get("laptop_needs") == "code":
+            filters.append("(p.spec_product::text ILIKE '%SSD%' OR p.spec_product::text ILIKE '%RAM%' OR p.spec_product::text ILIKE '%chip%' OR p.outstanding ILIKE '%lập trình%' OR p.outstanding ILIKE '%code%')")
+
+        if intent.get("headphone_needs") == "chong-on":
+            filters.append("(p.spec_product::text ILIKE '%ANC%' OR p.outstanding ILIKE '%chống ồn%' OR p.name ILIKE '%ANC%')")
+        elif intent.get("headphone_needs") == "gaming":
+            filters.append("(p.outstanding ILIKE '%gaming%' OR p.spec_product::text ILIKE '%gaming%' OR p.name ILIKE '%gaming%')")
+        elif intent.get("headphone_needs") == "chup-tai":
+            filters.append("(p.name ILIKE '%chụp tai%' OR p.spec_product::text ILIKE '%over-ear%' OR p.outstanding ILIKE '%over-ear%')")
+        elif intent.get("headphone_needs") == "nhet-tai":
+            filters.append("(p.name ILIKE '%true wireless%' OR p.spec_product::text ILIKE '%in-ear%' OR p.outstanding ILIKE '%nhet tai%' OR p.outstanding ILIKE '%in ear%')")
+
+        if category == 'may-lanh' and intent.get('room_size'):
+            match = re.search(r'(\d+)', intent['room_size'])
+            if match:
+                room_value = int(match.group(1))
+                if room_value <= 15:
+                    filters.append("(p.spec_product::text ILIKE '%1 HP%' OR p.spec_product::text ILIKE '%1.0 HP%' OR p.outstanding ILIKE '%1 HP%' OR p.name ILIKE '%1 HP%')")
+                elif room_value <= 28:
+                    filters.append("(p.spec_product::text ILIKE '%1.5 HP%' OR p.spec_product::text ILIKE '%1.5 HP%' OR p.outstanding ILIKE '%1.5 HP%' OR p.name ILIKE '%1.5 HP%')")
+                else:
+                    filters.append("(p.spec_product::text ILIKE '%2 HP%' OR p.spec_product::text ILIKE '%2.0 HP%' OR p.outstanding ILIKE '%2 HP%' OR p.name ILIKE '%2 HP%')")
+
+        if category == 'tu-lanh' and intent.get('family_members'):
+            members = intent['family_members']
+            if members <= 2:
+                filters.append("(p.spec_product::text ILIKE '%150L%' OR p.spec_product::text ILIKE '%180L%' OR p.outstanding ILIKE '%150L%' OR p.outstanding ILIKE '%180L%')")
+            elif members <= 4:
+                filters.append("(p.spec_product::text ILIKE '%200L%' OR p.spec_product::text ILIKE '%250L%' OR p.outstanding ILIKE '%200L%' OR p.outstanding ILIKE '%250L%')")
+            else:
+                filters.append("(p.spec_product::text ILIKE '%300L%' OR p.spec_product::text ILIKE '%330L%' OR p.outstanding ILIKE '%300L%' OR p.outstanding ILIKE '%330L%')")
 
     return filters
 
 
-def build_search_order_clause(category, user_message):
+def build_search_order_clause(category, intent, user_message):
     feature_map = parse_search_features(user_message)
+    if intent and intent.get("laptop_needs") == "do-hoa-game":
+        return "ORDER BY p.sale_price DESC"
+    if intent and intent.get("laptop_needs") == "van-phong":
+        return "ORDER BY p.sale_price ASC"
     if feature_map.get("gaming"):
         return "ORDER BY p.sale_price DESC"
     if feature_map.get("camera"):
         return "ORDER BY p.sale_price DESC"
     if feature_map.get("battery"):
         return "ORDER BY p.sale_price DESC"
-    return "ORDER BY p.sale_price DESC"
+    return "ORDER BY relevance DESC, p.sale_price DESC"
 
 
 def build_product_context(rows):
@@ -318,7 +370,7 @@ def category_has_products(category):
         return False
 
 
-def db_search_products(category, budget, user_message, limit=3):
+def db_search_products(category, budget, user_message, intent=None, limit=3):
     context = ""
     is_upsell = False
     top_relevance = 0
@@ -342,8 +394,9 @@ def db_search_products(category, budget, user_message, limit=3):
         }
         keywords = [w for w in words if w not in stop_words and not (w.isdigit() and len(w) >= 3)]
 
-        filters = build_search_filter_conditions(category, budget, user_message)
+        filters = build_search_filter_conditions(category, budget, intent, user_message)
         filter_sql = ' AND '.join(filters) if filters else '1=1'
+        order_clause = build_search_order_clause(category, intent, user_message)
 
         budget_cond = ''
         if budget:
@@ -401,7 +454,7 @@ def db_search_products(category, budget, user_message, limit=3):
             FROM products p
             LEFT JOIN categories c ON p.category_id = c.category_id
             WHERE {filter_sql}{budget_cond} AND {match_cond}
-            ORDER BY relevance DESC, p.sale_price DESC
+            {order_clause}
             LIMIT %s
         """
         params.append(limit)
@@ -594,7 +647,15 @@ def generate_advisor_response_stream(user_message, history=None):
                 accumulated_intent["category"] = normalized_cat
     else:
         # Thực hiện truy vấn sản phẩm từ Database trước để xem có khớp sản phẩm cụ thể hay không
-        context, is_upsell, top_relevance = db_search_products(category, budget, user_message)
+        intent_snapshot = {
+            "category": category,
+            "budget": budget,
+            "room_size": room_size,
+            "family_members": family_members,
+            "laptop_needs": laptop_needs,
+            "headphone_needs": headphone_needs
+        }
+        context, is_upsell, top_relevance = db_search_products(category, budget, user_message, intent=intent_snapshot)
 
     # Xây dựng danh sách tin nhắn hội thoại cho API chat
     if history:
