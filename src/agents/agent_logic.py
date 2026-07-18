@@ -166,9 +166,6 @@ def build_search_filter_conditions(category, budget, user_message):
     if feature_map.get("fast_charge"):
         filters.append("(p.spec_product::text ILIKE '%sạc nhanh%' OR p.spec_product::text ILIKE '%fast charge%' OR p.outstanding ILIKE '%sạc nhanh%')")
 
-    if budget:
-        filters.append("p.sale_price <= %s")
-
     return filters
 
 
@@ -348,6 +345,10 @@ def db_search_products(category, budget, user_message, limit=3):
         filters = build_search_filter_conditions(category, budget, user_message)
         filter_sql = ' AND '.join(filters) if filters else '1=1'
 
+        budget_cond = ''
+        if budget:
+            budget_cond = ' AND p.sale_price <= %s'
+
         relevance_score_expr = '0'
         match_cond = '1=1'
         if keywords:
@@ -399,7 +400,7 @@ def db_search_products(category, budget, user_message, limit=3):
                 ({relevance_score_expr}) as relevance
             FROM products p
             LEFT JOIN categories c ON p.category_id = c.category_id
-            WHERE {filter_sql} AND {match_cond}
+            WHERE {filter_sql}{budget_cond} AND {match_cond}
             ORDER BY relevance DESC, p.sale_price DESC
             LIMIT %s
         """
@@ -423,7 +424,7 @@ def db_search_products(category, budget, user_message, limit=3):
                     ({relevance_score_expr}) as relevance
                 FROM products p
                 LEFT JOIN categories c ON p.category_id = c.category_id
-                WHERE {sql_cond} AND {match_cond}{feature_filter}
+                WHERE {filter_sql} AND {match_cond}
                 ORDER BY relevance DESC, p.sale_price ASC
                 LIMIT %s
             """
@@ -432,9 +433,7 @@ def db_search_products(category, budget, user_message, limit=3):
 
         if not rows:
             params = []
-            budget_cond = ''
             if budget:
-                budget_cond = ' AND p.sale_price <= %s'
                 params.append(budget)
 
             query_fallback = f"""
@@ -451,7 +450,7 @@ def db_search_products(category, budget, user_message, limit=3):
                     0 as relevance
                 FROM products p
                 LEFT JOIN categories c ON p.category_id = c.category_id
-                WHERE {sql_cond}{feature_filter}{budget_cond}
+                WHERE {filter_sql}{budget_cond}
                 ORDER BY p.sale_price DESC
                 LIMIT %s
             """
@@ -475,7 +474,7 @@ def db_search_products(category, budget, user_message, limit=3):
                     0 as relevance
                 FROM products p
                 LEFT JOIN categories c ON p.category_id = c.category_id
-                WHERE {sql_cond}
+                WHERE {filter_sql}
                 ORDER BY p.sale_price ASC
                 LIMIT %s
             """
