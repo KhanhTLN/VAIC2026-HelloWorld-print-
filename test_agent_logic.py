@@ -10,6 +10,7 @@ from src.agents.agent_logic import (
     reset_intent_state_on_category_change,
     filter_history_for_current_category,
     db_search_products,
+    build_recommendation_text,
 )
 
 def test_query(user_message, history=None):
@@ -93,6 +94,26 @@ def test_db_search_products_falls_back_to_local_catalog_when_db_unavailable(monk
     assert matched_products, "expected fallback catalog products when DB is unavailable"
     assert any("iPhone 17 Pro Max" in product["name"] for product in matched_products)
     assert "iPhone 17 Pro Max" in context
+
+
+def test_build_recommendation_text_uses_real_prices_and_omits_placeholders():
+    products = [{
+        "product_id": "1",
+        "name": "Điện thoại iPhone 17 Pro Max 256GB",
+        "brand": "IPHONE (APPLE)",
+        "sale_price": 35990000,
+        "url": "",
+        "url_image": "",
+        "promotion": "",
+        "outstanding": "Màn hình OLED, pin 37 giờ",
+        "specs": {"Dung lượng lưu trữ": "256 GB"},
+    }]
+
+    text = build_recommendation_text(products, category="dien-thoai")
+    assert "35.990.000đ" in text
+    assert "Điện thoại iPhone 17 Pro Max 256GB" in text
+    assert "url" not in text.lower()
+    assert "url_image" not in text.lower()
 
 
 if __name__ == "__main__":

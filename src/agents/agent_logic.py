@@ -498,6 +498,9 @@ def search_local_catalog_products(category, brand, budget, user_message):
             "sale_price": price,
             "url": "",
             "url_image": "",
+            "promotion": product.get("gift_promotion") or "",
+            "outstanding": product.get("full_text") or "",
+            "specs": product.get("specs") or "",
         })
 
     return "\n".join(context_list), False, selected_products[0][0], matched_products
@@ -505,6 +508,62 @@ def search_local_catalog_products(category, brand, budget, user_message):
 # =====================================================================
 # TẦNG 4: TRUY VẤN NÂNG CAO 4 TẦNG (SỬA LỖI BỔ SUNG CỘT URL_IMAGE VÀ URL)
 # =====================================================================
+def build_recommendation_text(matched_products, category=None):
+    """Tạo text khuyến nghị sản phẩm từ dữ liệu thật, tránh lẫn placeholder và sai giá."""
+    if not matched_products:
+        return ""
+
+    lines = []
+    for product in matched_products[:3]:
+        name = product.get("name") or ""
+        price = safe_int(product.get("sale_price"))
+        formatted_price = format_price(price)
+        promotion = (product.get("promotion") or "").strip()
+        outstanding = (product.get("outstanding") or "").strip()
+        specs = product.get("specs") or {}
+        url = (product.get("url") or "").strip()
+        url_image = (product.get("url_image") or "").strip()
+
+        if isinstance(specs, dict):
+            spec_items = []
+            for key, value in list(specs.items())[:3]:
+                if value:
+                    spec_items.append(f"{key}: {value}")
+            spec_text = " - ".join(spec_items)
+        elif isinstance(specs, list):
+            spec_text = " - ".join([str(item) for item in specs[:3]])
+        else:
+            spec_text = str(specs or "")
+
+        line = f"Anh chị tham khảo sản phẩm {name} giá **{formatted_price}** ạ."
+        if spec_text:
+            line += f"\n- {spec_text}"
+        if outstanding:
+            line += f"\n- Tiện ích: {outstanding}"
+        if promotion:
+            line += f"\n- Khuyến mãi: {promotion}"
+        if url:
+            line += f"\n[Xem chi tiết sản phẩm tại Điện Máy Xanh]({url})"
+        if url_image:
+            line += f"\n![ảnh sản phẩm]({url_image})"
+        lines.append(line)
+
+    return "\n\n".join(lines)
+
+
+def build_direct_product_response(matched_products, category=None, requested_model=None, is_out_of_stock=False):
+    """Tạo phản hồi trực tiếp bằng dữ liệu thật khi có sản phẩm để đề xuất."""
+    if not matched_products:
+        return ""
+
+    intro = ""
+    if is_out_of_stock and requested_model:
+        intro = f"Xin lỗi, hiện tại model {requested_model} không còn hàng trong hệ thống của chúng tôi. Tôi sẽ giới thiệu cho bạn một số sản phẩm thay thế phù hợp:\n\n"
+
+    body = build_recommendation_text(matched_products, category=category)
+    return intro + body
+
+
 def db_search_products(category, brand, budget, user_message):
     """Thực hiện truy vấn SQL kết hợp tính điểm Relevance Score theo cấu trúc 4 tầng bảo vệ chống trống kho"""
     context = ""
@@ -724,6 +783,9 @@ def db_search_products(category, brand, budget, user_message):
                 "sale_price": price,
                 "url": url,
                 "url_image": url_image,
+                "promotion": promotion,
+                "outstanding": outstanding,
+                "specs": spec_product,
             })
             
         context = "\n".join(context_list)
@@ -895,6 +957,17 @@ def generate_advisor_response_stream(user_message, history=None):
             )
             is_out_of_stock = not has_exact_match and bool(matched_products)
 
+    # Nếu có dữ liệu sản phẩm thật thì trả lời trực tiếp bằng dữ liệu đó, không để LLM tự bịa giá/thông tin.
+    direct_response = build_direct_product_response(
+        matched_products,
+        category=category,
+        requested_model=requested_model if is_out_of_stock else None,
+        is_out_of_stock=is_out_of_stock,
+    )
+    if direct_response and not is_policy_query and not need_clarify:
+        yield direct_response
+        return
+
     # Bypass LLM nếu kho hàng trống trơn để tránh AI sinh ảo giác sản phẩm bịa đặt
     if category and not context and not is_policy_query and not need_clarify:
         yield "Dạ, hiện tại hệ thống siêu thị Điện Máy Xanh đang tạm hết dòng sản phẩm phù hợp với yêu cầu này của anh/chị. Anh/chị có thể thử thay đổi tầm giá, điều chỉnh nhu cầu hoặc tham khảo các nhóm sản phẩm khác đang sẵn hàng và có nhiều khuyến mãi lớn nhé ạ!"
@@ -949,6 +1022,11 @@ def generate_advisor_response_stream(user_message, history=None):
     # THIẾT LẬP CÁC CHỈ THỊ PHỤ TRỢ CHO PHẢN HỒI KHUYẾN NGHỊ SẢN PHẨM
     if not context or "Không tìm thấy" in context:
         context = "Hiện tại trong kho tạm hết dòng sản phẩm khớp chính xác với ngân sách này của anh chị." if category else ""
+
+    # Tạo text khuyến nghị từ dữ liệu thật để tránh lỗi giá/thông tin do LLM bịa.
+    recommendation_text = build_recommendation_text(matched_products, category=category)
+    if recommendation_text and not is_policy_query:
+        context = recommendation_text
 
     upsell_instruction = f"LƯU Ý BẮT BUỘC: Khách hàng muốn tìm sản phẩm dưới mức giá {format_price(budget)}, tuy nhiên các sản phẩm trong kho đều có giá cao hơn. Bạn BẮT BUỘC phải khéo léo giải thích rằng tầm giá này đang tạm hết, sau đó giới thiệu 2 phương án thay thế có giá rẻ nhất hiện có (trong dữ liệu trên) làm giải pháp tham khảo chất lượng cao." if is_upsell else ""
 
