@@ -1,8 +1,13 @@
 import os
 import sys
 import json
-import psycopg2
-from psycopg2.extras import RealDictCursor
+
+try:
+    import psycopg2
+    from psycopg2.extras import RealDictCursor
+except Exception:  # pragma: no cover - environment fallback
+    psycopg2 = None
+    RealDictCursor = None
 
 # Cấu hình stdout hiển thị tốt Tiếng Việt
 if sys.platform.startswith('win'):
@@ -12,6 +17,8 @@ if sys.platform.startswith('win'):
 DB_URL = "postgresql://postgres.bdcsgjmmizlbrgnaztto:PhamTheQuyen2005%40@aws-0-ap-northeast-1.pooler.supabase.com:5432/postgres"
 
 def get_db_connection():
+    if psycopg2 is None:
+        raise RuntimeError("psycopg2 is not installed; database connection unavailable")
     return psycopg2.connect(DB_URL)
 
 from decimal import Decimal
@@ -66,7 +73,7 @@ def normalize_category(cat_name):
 def sync_data():
     print("🔄 Đang kết nối tới Supabase PostgreSQL...")
     try:
-        conn = psycopg2.connect(DB_URL)
+        conn = get_db_connection()
         cursor = conn.cursor(cursor_factory=RealDictCursor)
         
         query = """

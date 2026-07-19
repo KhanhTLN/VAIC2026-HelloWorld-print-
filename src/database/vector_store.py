@@ -1,5 +1,9 @@
-import chromadb
-from chromadb.utils import embedding_functions
+try:
+    import chromadb
+    from chromadb.utils import embedding_functions
+except Exception:
+    chromadb = None
+    embedding_functions = None
 import json
 import sys
 import os
@@ -120,20 +124,23 @@ def get_vector_client():
     if _client is not None:
         return _client, _default_ef
     
-    import subprocess
     _use_mock = False
-    test_code = """
+    if chromadb is None or embedding_functions is None:
+        _use_mock = True
+    else:
+        import subprocess
+        test_code = """
 import chromadb
 client = chromadb.EphemeralClient()
 col = client.get_or_create_collection("test")
 col.add(ids=["1"], documents=["test"])
 """
-    try:
-        res = subprocess.run([sys.executable, "-c", test_code], capture_output=True, timeout=30)
-        if res.returncode != 0:
+        try:
+            res = subprocess.run([sys.executable, "-c", test_code], capture_output=True, timeout=30)
+            if res.returncode != 0:
+                _use_mock = True
+        except Exception:
             _use_mock = True
-    except Exception:
-        _use_mock = True
 
     if _use_mock:
         print("Cảnh báo: Phát hiện lỗi tương thích hệ thống với ChromaDB (lỗi onnxruntime hoặc CPU không hỗ trợ AVX2).")
