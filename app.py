@@ -1,6 +1,7 @@
 import streamlit as st
 import requests
 import os
+import re
 
 # Cấu hình URL backend qua biến môi trường (mặc định chạy local ở port 8001)
 BACKEND_URL = os.getenv("BACKEND_URL", "http://127.0.0.1:8001")
@@ -57,6 +58,63 @@ def render_reload_control(key_suffix):
         st.caption("Bấm reload khi bạn muốn tìm hiểu về những loại sản phẩm khác")
 
 
+COLLAPSIBLE_PREVIEW_MARKER = "__PREVIEW__"
+COLLAPSIBLE_END_PREVIEW_MARKER = "__END_PREVIEW__"
+COLLAPSIBLE_FULL_MARKER = "__FULL__"
+COLLAPSIBLE_END_FULL_MARKER = "__END_FULL__"
+
+
+def parse_collapsible_sections(content):
+    if not content:
+        return None, None
+
+    if (COLLAPSIBLE_PREVIEW_MARKER not in content or COLLAPSIBLE_FULL_MARKER not in content):
+        return None, None
+
+    preview_content = content.split(COLLAPSIBLE_PREVIEW_MARKER, 1)[1].split(COLLAPSIBLE_END_PREVIEW_MARKER, 1)[0].strip()
+    full_content = content.split(COLLAPSIBLE_FULL_MARKER, 1)[1].split(COLLAPSIBLE_END_FULL_MARKER, 1)[0].strip()
+
+    if not preview_content and not full_content:
+        return None, None
+
+    return preview_content, full_content
+
+
+def render_chat_content(content, expanded=False, toggle_key=None):
+    if not content:
+        return
+
+    preview_content, full_content = parse_collapsible_sections(content)
+    display_content = full_content if (expanded and full_content) else preview_content or content
+
+    image_urls = re.findall(r"!\[[^\]]*\]\((https?://[^\s)]+)\)", display_content)
+    cleaned_content = re.sub(r"!\[[^\]]*\]\((https?://[^\s)]+)\)", "", display_content)
+
+    dedup_lines = []
+    seen_lines = set()
+    for line in cleaned_content.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        if line in seen_lines:
+            continue
+        seen_lines.add(line)
+        dedup_lines.append(line)
+
+    cleaned_content = "\n".join(dedup_lines).strip()
+    for url in image_urls:
+        st.image(url, use_container_width=True)
+    if cleaned_content:
+        st.markdown(cleaned_content, unsafe_allow_html=True)
+
+    if preview_content and full_content and toggle_key is not None:
+        button_label = "ẩn bớt" if expanded else "xem tiếp"
+        if st.button(button_label, key=toggle_key, help="Mở rộng hoặc thu gọn nội dung chi tiết"):
+            expanded_state = st.session_state.setdefault("expanded_messages", {})
+            expanded_state[toggle_key] = not expanded
+            st.rerun()
+
+
 # Hàm gọi API Backend để lấy stream dữ liệu
 def get_backend_stream(message, history):
     try:
@@ -90,7 +148,14 @@ user_input = st.chat_input("Nhập nhu cầu của anh/chị tại đây...")
 latest_ai_index = max((index for index, message in enumerate(st.session_state.messages) if message["role"] == "assistant"), default=None)
 for index, message in enumerate(st.session_state.messages):
     with st.chat_message(message["role"]):
-        st.markdown(message["content"])
+        if message["role"] == "assistant":
+            expanded_state = st.session_state.setdefault("expanded_messages", {})
+            toggle_key = f"assistant_{index}"
+            expanded = expanded_state.get(toggle_key, False)
+            render_chat_content(message["content"], expanded=expanded, toggle_key=toggle_key)
+        else:
+            render_chat_content(message["content"])
+
         if not user_input and message["role"] == "assistant" and index == latest_ai_index:
             render_reload_control(f"history_{index}")
 
@@ -110,12 +175,9 @@ if user_input:
 
         for chunk in get_backend_stream(user_input, st.session_state.messages):
             ai_response += chunk
-            placeholder.markdown(
-                ai_response,
-                unsafe_allow_html=True
-            )
+            placeholder.empty()
+            render_chat_content(ai_response)
 
-        render_reload_control(f"fresh_{len(st.session_state.messages)}")
-            
     # Lưu câu trả lời của AI vào lịch sử chat
     st.session_state.messages.append({"role": "assistant", "content": ai_response})
+    st.rerun()

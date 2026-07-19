@@ -508,18 +508,74 @@ def search_local_catalog_products(category, brand, budget, user_message):
 # =====================================================================
 # TẦNG 4: TRUY VẤN NÂNG CAO 4 TẦNG (SỬA LỖI BỔ SUNG CỘT URL_IMAGE VÀ URL)
 # =====================================================================
-def build_recommendation_text(matched_products, category=None):
-    """Tạo text khuyến nghị sản phẩm từ dữ liệu thật, tránh lẫn placeholder và sai giá."""
+def summarize_text(value, max_length=100):
+    """Rút gọn text dài để phản hồi sản phẩm ngắn gọn và dễ đọc."""
+    if not value:
+        return ""
+    text = re.sub(r"\s+", " ", str(value).strip())
+    text = text.replace("Xem chi tiết", "").replace("Xem thông tin", "")
+    text = text.strip(" -;:")
+    if len(text) > max_length:
+        text = text[:max_length].rstrip() + "..."
+    return text
+
+
+def build_full_product_details(product, product_index=None):
+    """Tạo nội dung đầy đủ cho trường hợp khách hỏi chi tiết một sản phẩm."""
+    name = product.get("name") or ""
+    price = safe_int(product.get("sale_price"))
+    formatted_price = format_price(price)
+    promotion = (product.get("promotion") or "").strip()
+    outstanding = (product.get("outstanding") or "").strip()
+    specs = product.get("specs") or {}
+    url = (product.get("url") or "").strip()
+    url_image = (product.get("url_image") or "").strip()
+
+    if isinstance(specs, dict):
+        spec_items = []
+        for key, value in list(specs.items()):
+            if value:
+                spec_items.append(f"{key}: {value}")
+        spec_text = " - ".join(spec_items)
+    elif isinstance(specs, list):
+        spec_text = " - ".join([str(item) for item in specs])
+    else:
+        spec_text = str(specs or "")
+
+    lines = []
+    if product_index is not None:
+        lines.append(f"### {product_index}. {name}")
+    else:
+        lines.append(f"### {name}")
+    lines.append(f"Giá: **{formatted_price}**")
+    if spec_text:
+        lines.append(f"- Thông số: {spec_text}")
+    if outstanding and not outstanding.startswith("Sản phẩm") and not outstanding.startswith("Thương hiệu"):
+        lines.append(f"- Tiện ích: {outstanding}")
+    if promotion:
+        lines.append(f"- Khuyến mãi: {promotion}")
+    if url:
+        lines.append(f"[Xem chi tiết sản phẩm tại Điện Máy Xanh]({url})")
+    if url_image:
+        lines.append(f"![ảnh sản phẩm]({url_image})")
+    return "\n".join(lines)
+
+
+def build_recommendation_text(matched_products, category=None, is_detailed=False):
+    """Tạo text khuyến nghị sản phẩm từ dữ liệu thật, dùng rút gọn cho danh sách, đầy đủ cho câu hỏi chi tiết."""
     if not matched_products:
         return ""
 
-    lines = []
-    for product in matched_products[:3]:
+    if is_detailed and len(matched_products) == 1:
+        return build_full_product_details(matched_products[0], product_index=1)
+
+    blocks = []
+    for index, product in enumerate(matched_products[:3], start=1):
         name = product.get("name") or ""
         price = safe_int(product.get("sale_price"))
         formatted_price = format_price(price)
-        promotion = (product.get("promotion") or "").strip()
-        outstanding = (product.get("outstanding") or "").strip()
+        promotion = summarize_text(product.get("promotion") or "", 120)
+        outstanding = summarize_text(product.get("outstanding") or "", 120)
         specs = product.get("specs") or {}
         url = (product.get("url") or "").strip()
         url_image = (product.get("url_image") or "").strip()
@@ -528,27 +584,35 @@ def build_recommendation_text(matched_products, category=None):
             spec_items = []
             for key, value in list(specs.items())[:3]:
                 if value:
-                    spec_items.append(f"{key}: {value}")
+                    spec_items.append(f"{key}: {summarize_text(value, 45)}")
             spec_text = " - ".join(spec_items)
         elif isinstance(specs, list):
-            spec_text = " - ".join([str(item) for item in specs[:3]])
+            spec_text = " - ".join([summarize_text(str(item), 45) for item in specs[:3]])
         else:
-            spec_text = str(specs or "")
+            spec_text = summarize_text(specs or "", 90)
 
-        line = f"Anh chị tham khảo sản phẩm {name} giá **{formatted_price}** ạ."
+        preview_lines = [f"### {index}. {name}", f"Giá: **{formatted_price}**"]
         if spec_text:
-            line += f"\n- {spec_text}"
-        if outstanding:
-            line += f"\n- Tiện ích: {outstanding}"
+            preview_lines.append(f"- {spec_text}")
+        if outstanding and not outstanding.startswith("Sản phẩm") and not outstanding.startswith("Thương hiệu"):
+            preview_lines.append(f"- Tiện ích: {outstanding}")
         if promotion:
-            line += f"\n- Khuyến mãi: {promotion}"
-        if url:
-            line += f"\n[Xem chi tiết sản phẩm tại Điện Máy Xanh]({url})"
-        if url_image:
-            line += f"\n![ảnh sản phẩm]({url_image})"
-        lines.append(line)
+            preview_lines.append(f"- Khuyến mãi: {promotion}")
+        preview_lines.append("...")
 
-    return "\n\n".join(lines)
+        full_text = build_full_product_details(product, product_index=index)
+        preview_text = "\n".join(preview_lines)
+
+        blocks.append(
+            "__PREVIEW__\n"
+            f"{preview_text}\n"
+            "__END_PREVIEW__\n"
+            "__FULL__\n"
+            f"{full_text}\n"
+            "__END_FULL__"
+        )
+
+    return "\n\n---\n\n".join(blocks)
 
 
 def build_direct_product_response(matched_products, category=None, requested_model=None, is_out_of_stock=False):
@@ -560,7 +624,7 @@ def build_direct_product_response(matched_products, category=None, requested_mod
     if is_out_of_stock and requested_model:
         intro = f"Xin lỗi, hiện tại model {requested_model} không còn hàng trong hệ thống của chúng tôi. Tôi sẽ giới thiệu cho bạn một số sản phẩm thay thế phù hợp:\n\n"
 
-    body = build_recommendation_text(matched_products, category=category)
+    body = build_recommendation_text(matched_products, category=category, is_detailed=is_out_of_stock and requested_model is not None)
     return intro + body
 
 
