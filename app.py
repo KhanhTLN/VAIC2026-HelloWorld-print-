@@ -4,7 +4,7 @@ import requests
 import streamlit as st
 
 # Cấu hình URL backend qua biến môi trường (mặc định chạy local ở port 8001)
-BACKEND_URL = os.getenv("BACKEND_URL", "https://sports-precise-campaigns-chips.trycloudflare.com")
+BACKEND_URL = os.getenv("BACKEND_URL", "https://otherwise-enb-answering-aspect.trycloudflare.com")
 
 # 1. Cấu hình tiêu đề trang web
 st.set_page_config(page_title="Trợ lý AI Điện Máy Xanh", page_icon="⚡", layout="centered")
